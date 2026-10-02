@@ -56,6 +56,19 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 - id 不存在时返回 `job_not_found`（退出码 1，不创建记录）；对 `queued` 或 `succeeded`
   任务重试时返回 `invalid_state` 与原状态/结果（退出码 1，原记录不变）。
 
+### 测试
+
+retry 公开行为的回归测试仅使用 Python 3 标准库，在项目根目录运行：
+
+```bash
+python3 -m unittest tests.test_retry -v
+```
+
+测试通过 `python3 -m task_center --db <临时数据库>` 子进程校验 JSON 输出与退出码；
+演示数据由测试自行以 UUID 文件名写入 `demo/`（非法 CSV `a,x` 及改写后的
+`a,10 / b,20 / a,5`），不依赖预置任务或外部服务，结束后只清理自身文件与数据库，
+可连续重复运行。
+
 ### 演示
 
 `demo/sales.csv` 内容为 `a,10`、`b,20`、`a,5`，执行后结果为
