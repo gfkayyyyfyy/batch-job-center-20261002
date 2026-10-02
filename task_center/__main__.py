@@ -38,6 +38,50 @@ def build_parser():
     return parser
 
 
+# run/retry/cancel 与核心操作的对应关系：三者共用同一套拒绝响应转换。
+_STATE_CHANGE_ACTIONS = {
+    "run": core.run,
+    "retry": core.retry,
+    "cancel": core.cancel,
+}
+
+
+def _rejection_record(conn, job_id, exc):
+    """把核心操作抛出的业务异常转换为拒绝响应记录。
+
+    invalid_state 时任务存在，响应保留数据库当前记录的 id、status、result，
+    仅把本次响应的 error 改为 invalid_state（不写回数据库）；其余错误码
+    （如 job_not_found）保留传入 id，status、result 为 null。
+    """
+    record = {"id": job_id, "status": None, "result": None, "error": exc.code}
+    if exc.code == core.ERR_INVALID_STATE:
+        # invalid_state 时展示当前记录，便于调用方了解状态
+        try:
+            current = core.show(conn, job_id)
+            current["error"] = exc.code
+            record = current
+        except core.TaskError:
+            pass
+    return record
+
+
+def _dispatch_state_change(conn, command, job_id):
+    """执行 run/retry/cancel，返回 (响应记录, 退出码)。
+
+    成功时沿用核心操作返回的记录；被拒绝时统一转换业务错误。
+    run 以最终状态决定退出码（succeeded 为 0），retry/cancel 成功即 0。
+    """
+    try:
+        record = _STATE_CHANGE_ACTIONS[command](conn, job_id)
+    except core.TaskError as exc:
+        return _rejection_record(conn, job_id, exc), 1
+    if command == "run":
+        exit_code = 0 if record["status"] == core.STATUS_SUCCEEDED else 1
+    else:
+        exit_code = 0
+    return record, exit_code
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     conn = core.connect(args.db)
@@ -45,57 +89,11 @@ def main(argv=None):
         if args.command == "submit":
             record = core.submit(conn, args.type, args.input)
             exit_code = 0
-        elif args.command == "run":
-            try:
-                record = core.run(conn, args.id)
-            except core.TaskError as exc:
-                record = {"id": args.id, "status": None, "result": None, "error": exc.code}
-                # invalid_state 时展示当前记录，便于调用方了解状态
-                if exc.code == core.ERR_INVALID_STATE:
-                    try:
-                        current = core.show(conn, args.id)
-                        current["error"] = exc.code
-                        record = current
-                    except core.TaskError:
-                        pass
-                exit_code = 1
-            else:
-                exit_code = 0 if record["status"] == core.STATUS_SUCCEEDED else 1
-        elif args.command == "retry":
-            try:
-                record = core.retry(conn, args.id)
-            except core.TaskError as exc:
-                record = {"id": args.id, "status": None, "result": None, "error": exc.code}
-                # invalid_state 时展示当前记录，便于调用方了解状态
-                if exc.code == core.ERR_INVALID_STATE:
-                    try:
-                        current = core.show(conn, args.id)
-                        current["error"] = exc.code
-                        record = current
-                    except core.TaskError:
-                        pass
-                exit_code = 1
-            else:
-                exit_code = 0
-        elif args.command == "cancel":
-            try:
-                record = core.cancel(conn, args.id)
-            except core.TaskError as exc:
-                record = {"id": args.id, "status": None, "result": None, "error": exc.code}
-                # invalid_state 时展示当前记录，便于调用方了解状态
-                if exc.code == core.ERR_INVALID_STATE:
-                    try:
-                        current = core.show(conn, args.id)
-                        current["error"] = exc.code
-                        record = current
-                    except core.TaskError:
-                        pass
-                exit_code = 1
-            else:
-                exit_code = 0
-        else:  # show
+        elif args.command == "show":
             record = core.show(conn, args.id)
             exit_code = 0
+        else:  # run / retry / cancel：共用同一套拒绝响应转换
+            record, exit_code = _dispatch_state_change(conn, args.command, args.id)
     except core.TaskError as exc:
         record = {"id": getattr(args, "id", None), "status": None, "result": None, "error": exc.code}
         exit_code = 1
