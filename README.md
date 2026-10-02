@@ -23,6 +23,9 @@ python -m task_center show <id>
 # 让 failed 任务重新入队（沿用原 id，不立即执行、不读取文件）
 python -m task_center retry <id>
 
+# 取消 queued 任务（保留记录、停止后续执行，不读取文件、不执行汇总）
+python -m task_center cancel <id>
+
 # 指定数据库文件（默认使用项目目录下 tasks.sqlite3，首次使用自动创建）
 python -m task_center --db /path/to/tasks.sqlite3 show <id>
 ```
@@ -45,7 +48,7 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 | `input_error` | 执行时文件不可读 |
 | `data_error` | 执行时编码、表头、列数或字段不合法 |
 | `job_not_found` | 任务 id 不存在 |
-| `invalid_state` | 对非 queued 任务执行 run、或对非 failed 任务执行 retry（原记录不变） |
+| `invalid_state` | 对非 queued 任务执行 run 或 cancel、或对非 failed 任务执行 retry（原记录不变） |
 
 ### 重试
 
@@ -55,6 +58,21 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
   再次失败后仍可继续 retry。
 - id 不存在时返回 `job_not_found`（退出码 1，不创建记录）；对 `queued` 或 `succeeded`
   任务重试时返回 `invalid_state` 与原状态/结果（退出码 1，原记录不变）。
+
+### 取消
+
+- 仅 `queued` 任务可取消；成功后同一条记录变为 `cancelled`，沿用原 id，
+  `result` 与 `error` 均为 null，退出码为 0。
+- cancel 只修改任务状态，不读取文件也不校验 CSV：即使提交后文件被删除或内容变为非法，
+  也能正常取消；不执行汇总，任务类型与输入路径保持原值，不新增或删除任务记录。
+- `failed` 任务经 retry 回到 `queued` 后同样可以取消。
+- `cancelled` 任务不能再 run，也不能 retry 恢复排队：两种操作均返回退出码 1、
+  原 id、`cancelled` 状态、null 结果与 `invalid_state` 错误，保存的记录不变。
+- 对 `failed`、`succeeded` 或已经 `cancelled` 的任务取消时，返回退出码 1、
+  `invalid_state` 与当前状态/已有结果，数据库中的状态、结果及原错误值全部不变。
+- id 不存在时返回 `job_not_found`（退出码 1，`status` 与 `result` 为 null，不创建记录）。
+- 取消状态保存在 SQLite 中，命令退出后重新 show 仍得到同一条 `cancelled` 记录。
+- 取消只针对顺序调用中尚未执行的排队任务，不会中断正在执行的任务。
 
 ### 演示
 

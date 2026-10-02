@@ -1,4 +1,4 @@
-"""命令行入口：python -m task_center [--db PATH] <submit|run|show|retry> ..."""
+"""命令行入口：python -m task_center [--db PATH] <submit|run|show|retry|cancel> ..."""
 
 import argparse
 import json
@@ -32,6 +32,9 @@ def build_parser():
     p_retry = sub.add_parser("retry", help="让 failed 任务重新入队（不立即执行）")
     p_retry.add_argument("id", help="任务 id")
 
+    p_cancel = sub.add_parser("cancel", help="取消 queued 任务（保留记录，不执行）")
+    p_cancel.add_argument("id", help="任务 id")
+
     return parser
 
 
@@ -58,9 +61,10 @@ def main(argv=None):
                 exit_code = 1
             else:
                 exit_code = 0 if record["status"] == core.STATUS_SUCCEEDED else 1
-        elif args.command == "retry":
+        elif args.command in ("retry", "cancel"):
+            action = core.retry if args.command == "retry" else core.cancel
             try:
-                record = core.retry(conn, args.id)
+                record = action(conn, args.id)
             except core.TaskError as exc:
                 record = {"id": args.id, "status": None, "result": None, "error": exc.code}
                 # invalid_state 时展示当前记录，便于调用方了解状态
