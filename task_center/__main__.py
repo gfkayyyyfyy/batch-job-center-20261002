@@ -38,6 +38,45 @@ def build_parser():
     return parser
 
 
+def _rejection_record(conn, job_id, exc):
+    """把业务异常统一转换为拒绝响应记录（不写数据库）。
+
+    默认回显传入 id，status/result 为 null，error 为异常错误码；
+    invalid_state 表示任务存在但当前状态不允许该操作，此时附带已
+    保存记录的 status/result，仅把本次响应的 error 改为
+    invalid_state，便于调用方了解状态。若任务此时查不到（如
+    job_not_found），则保留默认响应。
+    """
+    record = {"id": job_id, "status": None, "result": None, "error": exc.code}
+    if exc.code == core.ERR_INVALID_STATE:
+        try:
+            current = core.show(conn, job_id)
+        except core.TaskError:
+            pass
+        else:
+            current["error"] = exc.code
+            record = current
+    return record
+
+
+def _exit_code_on_success(record):
+    """run 成功返回时：仅 succeeded 退出码为 0。"""
+    return 0 if record["status"] == core.STATUS_SUCCEEDED else 1
+
+
+def _dispatch(conn, action, job_id, success_exit_code):
+    """执行 run/retry/cancel 这类按 id 的操作，统一处理拒绝响应。
+
+    成功时由 success_exit_code 依据返回记录决定退出码；业务异常
+    一律转换为退出码 1 的拒绝响应。返回 (记录, 退出码)。
+    """
+    try:
+        record = action(conn, job_id)
+    except core.TaskError as exc:
+        return _rejection_record(conn, job_id, exc), 1
+    return record, success_exit_code(record)
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     conn = core.connect(args.db)
@@ -46,58 +85,19 @@ def main(argv=None):
             record = core.submit(conn, args.type, args.input)
             exit_code = 0
         elif args.command == "run":
-            try:
-                record = core.run(conn, args.id)
-            except core.TaskError as exc:
-                record = {"id": args.id, "status": None, "result": None, "error": exc.code}
-                # invalid_state 时展示当前记录，便于调用方了解状态
-                if exc.code == core.ERR_INVALID_STATE:
-                    try:
-                        current = core.show(conn, args.id)
-                        current["error"] = exc.code
-                        record = current
-                    except core.TaskError:
-                        pass
-                exit_code = 1
-            else:
-                exit_code = 0 if record["status"] == core.STATUS_SUCCEEDED else 1
+            record, exit_code = _dispatch(
+                conn, core.run, args.id, _exit_code_on_success
+            )
         elif args.command == "retry":
-            try:
-                record = core.retry(conn, args.id)
-            except core.TaskError as exc:
-                record = {"id": args.id, "status": None, "result": None, "error": exc.code}
-                # invalid_state 时展示当前记录，便于调用方了解状态
-                if exc.code == core.ERR_INVALID_STATE:
-                    try:
-                        current = core.show(conn, args.id)
-                        current["error"] = exc.code
-                        record = current
-                    except core.TaskError:
-                        pass
-                exit_code = 1
-            else:
-                exit_code = 0
+            record, exit_code = _dispatch(conn, core.retry, args.id, lambda _r: 0)
         elif args.command == "cancel":
-            try:
-                record = core.cancel(conn, args.id)
-            except core.TaskError as exc:
-                record = {"id": args.id, "status": None, "result": None, "error": exc.code}
-                # invalid_state 时展示当前记录，便于调用方了解状态
-                if exc.code == core.ERR_INVALID_STATE:
-                    try:
-                        current = core.show(conn, args.id)
-                        current["error"] = exc.code
-                        record = current
-                    except core.TaskError:
-                        pass
-                exit_code = 1
-            else:
-                exit_code = 0
+            record, exit_code = _dispatch(conn, core.cancel, args.id, lambda _r: 0)
         else:  # show
             record = core.show(conn, args.id)
             exit_code = 0
     except core.TaskError as exc:
-        record = {"id": getattr(args, "id", None), "status": None, "result": None, "error": exc.code}
+        # submit 的参数没有 id（getattr 回退为 None）；show 等命令则回显传入 id。
+        record = _rejection_record(conn, getattr(args, "id", None), exc)
         exit_code = 1
     finally:
         conn.close()
