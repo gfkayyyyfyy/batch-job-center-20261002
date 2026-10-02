@@ -22,12 +22,17 @@ STATUS_CANCELLED = "cancelled"
 
 ERR_INVALID_TYPE = "invalid_type"
 ERR_INVALID_INPUT = "invalid_input"
+ERR_INVALID_REQUEST_KEY = "invalid_request_key"
+ERR_REQUEST_CONFLICT = "request_conflict"
 ERR_INPUT = "input_error"
 ERR_DATA = "data_error"
 ERR_JOB_NOT_FOUND = "job_not_found"
 ERR_INVALID_STATE = "invalid_state"
 
 _AMOUNT_RE = re.compile(r"[0-9]+")
+
+# 请求键：1 至 64 个 ASCII 字母、数字、下划线或连字符，区分大小写，不裁剪空白。
+_REQUEST_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -39,6 +44,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     error TEXT
 )
 """
+
+# 请求键绑定列：旧库经 ALTER TABLE 补齐，旧记录该列为 NULL，不参与键匹配。
+_REQUEST_KEY_COLUMN = "ALTER TABLE jobs ADD COLUMN request_key TEXT"
+
+# 同一数据库内请求键唯一；NULL（未提供键的任务）在 SQLite 唯一索引中互不相等。
+_REQUEST_KEY_INDEX = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_request_key"
+    " ON jobs (request_key)"
+)
 
 
 class TaskError(Exception):
@@ -53,6 +67,10 @@ def connect(db_path):
     """打开（必要时创建）数据库并初始化表结构。"""
     conn = sqlite3.connect(str(db_path))
     conn.execute(_SCHEMA)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "request_key" not in columns:
+        conn.execute(_REQUEST_KEY_COLUMN)
+    conn.execute(_REQUEST_KEY_INDEX)
     conn.commit()
     return conn
 
@@ -80,16 +98,37 @@ def _row_to_record(row):
     return _record(job_id, status, json.loads(result) if result else None, error)
 
 
-def submit(conn, task_type, input_path):
-    """登记任务，仅校验类型与路径，不校验文件内容。"""
+def submit(conn, task_type, input_path, request_key=None):
+    """登记任务，仅校验类型与路径，不校验文件内容。
+
+    提供 request_key 时按同一数据库内的键识别重复请求：已有绑定且
+    任务类型与输入路径原字符串都相同时，直接返回该任务当前保存的
+    完整记录（不新增任务、不改变状态、不再检查文件）；类型或路径
+    不匹配时拒绝（request_conflict，不检查新路径）。首次使用有效
+    键时按原规则校验路径并登记 queued 任务；路径不合法则不创建
+    任务也不占用该键。不提供键时每次登记都创建新任务。
+    """
     if task_type not in TASK_TYPES:
         raise TaskError(ERR_INVALID_TYPE)
+    if request_key is not None:
+        if not _REQUEST_KEY_RE.fullmatch(request_key):
+            raise TaskError(ERR_INVALID_REQUEST_KEY)
+        row = conn.execute(
+            "SELECT id, type, input, status, result, error FROM jobs"
+            " WHERE request_key = ?",
+            (request_key,),
+        ).fetchone()
+        if row is not None:
+            _id, bound_type, bound_input, _status, _result, _error = row
+            if bound_type == task_type and bound_input == input_path:
+                return _row_to_record(row)
+            raise TaskError(ERR_REQUEST_CONFLICT)
     _resolve_input(input_path)
     job_id = uuid.uuid4().hex
     conn.execute(
-        "INSERT INTO jobs (id, type, input, status, result, error)"
-        " VALUES (?, ?, ?, ?, NULL, NULL)",
-        (job_id, task_type, input_path, STATUS_QUEUED),
+        "INSERT INTO jobs (id, type, input, status, result, error, request_key)"
+        " VALUES (?, ?, ?, ?, NULL, NULL, ?)",
+        (job_id, task_type, input_path, STATUS_QUEUED, request_key),
     )
     conn.commit()
     return _record(job_id, STATUS_QUEUED, None, None)
