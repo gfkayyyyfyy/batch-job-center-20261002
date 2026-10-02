@@ -2,7 +2,9 @@
 
 通过 `python -m task_center` 子进程观察 JSON 输出与退出码，
 每个用例使用独立的临时 SQLite 数据库（--db 指定）和 demo 目录内
-专用的演示文件，测试结束仅清理自身数据，可连续重复运行。
+专用的演示文件。模块开始准备时若 demo 目录不存在会自行创建，
+结束时仅在该目录由本模块创建且已经为空的情况下移除；测试结束
+仅清理自身数据，可连续重复运行。
 
 运行方式（项目根目录下，仅需 Python 3 标准库）：
 
@@ -28,6 +30,44 @@ DEMO_DIR = PROJECT_ROOT / "demo"
 DEMO_FILE = DEMO_DIR / "cancel_regression_case.csv"
 DEMO_INPUT = "demo/cancel_regression_case.csv"
 
+# demo 目录是否在本模块开始准备前就已存在。该判断在导入时记录：
+# 联合运行时 unittest 先导入命令行上的全部模块再依次执行，因此两个
+# 顺序执行的模块各自保留独立结论，互不串扰。
+_demo_preexisting = DEMO_DIR.exists()
+
+
+def setUpModule():
+    """准备演示目录与样例生命周期的前置条件。
+
+    demo 目录不存在时由测试自行创建；专用样例若已存在则直接令本模块
+    失败（失败信息包含冲突路径），绝不覆盖或删除任何既有文件。
+    """
+    if DEMO_FILE.exists():
+        raise AssertionError(
+            "演示样例已存在，为避免覆盖或误删他人数据而中止：%s" % DEMO_FILE
+        )
+    # 仅创建 demo 自身；项目根目录必然已存在。
+    DEMO_DIR.mkdir(exist_ok=True)
+
+
+def tearDownModule():
+    """回收本模块自建数据。
+
+    删除专用样例（样例已在用例中被删除时不报错）；仅当 demo 目录由
+    本模块创建且删除样例后已经为空时才移除目录，目录中仍有其他文件
+    （含 tasks.sqlite3 等非测试文件）时一律保留。
+    """
+    try:
+        DEMO_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    if not _demo_preexisting:
+        try:
+            DEMO_DIR.rmdir()
+        except OSError:
+            # 目录非空或已被移除：非空说明含非本测试文件，保留原样。
+            pass
+
 INVALID_CSV = "category,amount\na,x\n"
 VALID_CSV = "category,amount\na,10\n"
 EXPECTED_RESULT = {"row_count": 1, "total_amount": 10, "categories": {"a": 10}}
@@ -43,9 +83,8 @@ class CancelRegressionTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="task_center_cancel_test_")
         self.addCleanup(self._tmp.cleanup)
         self.db = str(Path(self._tmp.name) / "tasks.sqlite3")
-        # 演示文件若已存在则拒绝覆盖，保证只清理自身数据。
-        if DEMO_FILE.exists():
-            self.fail("演示文件已存在，为避免误删他人数据而中止：%s" % DEMO_FILE)
+        # 样例冲突已在 setUpModule 拒绝；此处登记清理，保证断言失败后
+        # 也只回收本测试自己写入的样例文件。
         self.addCleanup(self._remove_demo_file)
 
     def _remove_demo_file(self):

@@ -87,8 +87,11 @@ python -m unittest tests.test_retry_regression tests.test_cancel_regression -v
 ```
 
 测试通过 `python -m task_center` 子进程观察 JSON 输出与退出码。演示数据由测试
-自行准备：在 `demo/` 下创建专用文件 `retry_regression_case.csv`（先写入非法内容
+自行准备：`demo/` 目录不存在时自动创建，并在 `demo/` 下创建专用文件
+`retry_regression_case.csv`（先写入非法内容
 `a,x` 制造 `data_error` 失败任务，再改写为 `a,10`、`b,20`、`a,5` 验证成功路径）与
 `cancel_regression_case.csv`（`a,10`，并在取消前删除或改写为非法内容验证 cancel
-不读取文件），并通过 `--db` 使用临时目录下的独立 SQLite 数据库。测试不依赖预置
-任务或外部服务，结束后仅删除自建文件与临时库，可连续重复运行。
+不读取文件），并通过 `--db` 使用临时目录下的独立 SQLite 数据库。同名样例若已存在，
+对应模块直接失败且不改动该文件。测试不依赖预置
+任务或外部服务，结束后仅删除自建文件与临时库；`demo/` 由测试创建且已为空时才一并
+移除，原本存在的 `demo/` 及其中其他文件保持原样，可连续重复运行。
