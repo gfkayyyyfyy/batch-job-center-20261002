@@ -22,6 +22,14 @@ def build_parser():
     p_submit = sub.add_parser("submit", help="登记任务（不执行）")
     p_submit.add_argument("type", help="任务类型，目前支持 csv_summary")
     p_submit.add_argument("--input", required=True, help="相对项目目录的输入文件（限 demo 目录内）")
+    p_submit.add_argument(
+        "--request-key",
+        default=None,
+        help=(
+            "可选的幂等键（1-64 个 ASCII 字母、数字、下划线或连字符）；"
+            "同库内同键且任务类型与输入路径字符串均相同的重复提交直接返回原任务"
+        ),
+    )
 
     p_run = sub.add_parser("run", help="手动执行一个 queued 任务")
     p_run.add_argument("id", help="任务 id")
@@ -82,7 +90,9 @@ def main(argv=None):
     conn = core.connect(args.db)
     try:
         if args.command == "submit":
-            record = core.submit(conn, args.type, args.input)
+            record = core.submit(
+                conn, args.type, args.input, request_key=args.request_key
+            )
             exit_code = 0
         elif args.command == "run":
             record, exit_code = _dispatch(
