@@ -23,6 +23,9 @@ python -m task_center show <id>
 # 让 failed 任务重新入队（沿用原 id，不立即执行、不读取文件）
 python -m task_center retry <id>
 
+# 取消一个 queued 任务（保留记录，不再执行、不读取文件）
+python -m task_center cancel <id>
+
 # 指定数据库文件（默认使用项目目录下 tasks.sqlite3，首次使用自动创建）
 python -m task_center --db /path/to/tasks.sqlite3 show <id>
 ```
@@ -45,7 +48,7 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 | `input_error` | 执行时文件不可读 |
 | `data_error` | 执行时编码、表头、列数或字段不合法 |
 | `job_not_found` | 任务 id 不存在 |
-| `invalid_state` | 对非 queued 任务执行 run、或对非 failed 任务执行 retry（原记录不变） |
+| `invalid_state` | 对非 queued 任务执行 run 或 cancel、或对非 failed 任务执行 retry（原记录不变） |
 
 ### 重试
 
@@ -56,6 +59,18 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 - id 不存在时返回 `job_not_found`（退出码 1，不创建记录）；对 `queued` 或 `succeeded`
   任务重试时返回 `invalid_state` 与原状态/结果（退出码 1，原记录不变）。
 
+### 取消
+
+- 仅 `queued` 任务可取消；成功后同一条记录变为 `cancelled`，`result` 与 `error` 均为 null，
+  退出码为 0。沿用原 id、任务类型与输入路径，不新增或删除任务记录，也不执行汇总。
+- cancel 只修改任务状态，不读取文件也不校验 CSV：即使提交后文件被删除或内容变为非法
+  也能取消；`failed` 任务经 retry 回到 `queued` 后同样适用。
+- `cancelled` 任务不能通过 run 执行，也不能通过 retry 恢复排队，两种操作均返回
+  `invalid_state` 与 cancelled 状态（退出码 1，原记录不变）；show 仍正常返回该记录。
+- id 不存在时返回 `job_not_found`（退出码 1，不创建记录）；对 `failed`、`succeeded`
+  或已 `cancelled` 任务取消时返回 `invalid_state` 与当前状态/结果（退出码 1，
+  数据库中的状态、结果及原错误值均不变）。
+
 ### 演示
 
 `demo/sales.csv` 内容为 `a,10`、`b,20`、`a,5`，执行后结果为
@@ -64,14 +79,16 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 ### 回归测试
 
 `tests/test_retry_regression.py` 覆盖失败任务显式重试（retry）的公开行为，
+`tests/test_cancel_regression.py` 覆盖排队任务取消（cancel）的公开行为，
 仅需 Python 3 标准库，在项目根目录运行：
 
 ```bash
-python -m unittest tests.test_retry_regression -v
+python -m unittest tests.test_retry_regression tests.test_cancel_regression -v
 ```
 
 测试通过 `python -m task_center` 子进程观察 JSON 输出与退出码。演示数据由测试
 自行准备：在 `demo/` 下创建专用文件 `retry_regression_case.csv`（先写入非法内容
-`a,x` 制造 `data_error` 失败任务，再改写为 `a,10`、`b,20`、`a,5` 验证成功路径），
-并通过 `--db` 使用临时目录下的独立 SQLite 数据库。测试不依赖预置任务或外部服务，
-结束后仅删除自建文件与临时库，可连续重复运行。
+`a,x` 制造 `data_error` 失败任务，再改写为 `a,10`、`b,20`、`a,5` 验证成功路径）与
+`cancel_regression_case.csv`（`a,10`，并在取消前删除或改写为非法内容验证 cancel
+不读取文件），并通过 `--db` 使用临时目录下的独立 SQLite 数据库。测试不依赖预置
+任务或外部服务，结束后仅删除自建文件与临时库，可连续重复运行。
