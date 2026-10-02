@@ -103,10 +103,12 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 `tests/test_retry_regression.py` 覆盖失败任务显式重试（retry）的公开行为，
 `tests/test_cancel_regression.py` 覆盖排队任务取消（cancel）的公开行为，
 `tests/test_request_key_regression.py` 覆盖提交去重（--request-key）的公开行为，
+`tests/test_legacy_db_compat_regression.py` 覆盖旧版数据库（jobs 表无请求键列）
+首次使用自动兼容及旧库上请求键提交的公开行为，
 仅需 Python 3 标准库，在项目根目录运行：
 
 ```bash
-python -m unittest tests.test_retry_regression tests.test_cancel_regression tests.test_request_key_regression -v
+python -m unittest tests.test_retry_regression tests.test_cancel_regression tests.test_request_key_regression tests.test_legacy_db_compat_regression -v
 ```
 
 测试通过 `python -m task_center` 子进程观察 JSON 输出与退出码。演示数据由测试
@@ -115,7 +117,9 @@ python -m unittest tests.test_retry_regression tests.test_cancel_regression test
 `a,x` 制造 `data_error` 失败任务，再改写为 `a,10`、`b,20`、`a,5` 验证成功路径）与
 `cancel_regression_case.csv`（`a,10`，并在取消前删除或改写为非法内容验证 cancel
 不读取文件）与 `request_key_regression_case.csv`（`a,10`、`b,20`、`a,5`，验证同键
-去重、冲突与键合法性），并通过 `--db` 使用临时目录下的独立 SQLite 数据库。同名样例若已存在，
+去重、冲突与键合法性）与 `legacy_db_compat_case.csv`（`a,10`、`b,20`、`a,5`，
+验证旧版数据库自动补齐请求键列、旧记录不变及旧库上的键去重与冲突），
+并通过 `--db` 使用临时目录下的独立 SQLite 数据库。同名样例若已存在，
 对应模块直接失败且不改动该文件。测试不依赖预置
 任务或外部服务，结束后仅删除自建文件与临时库；`demo/` 由测试创建且已为空时才一并
 移除，原本存在的 `demo/` 及其中其他文件保持原样，可连续重复运行。
