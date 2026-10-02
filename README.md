@@ -20,6 +20,9 @@ python -m task_center run <id>
 # 查询已保存的任务记录（退出后仍可查询）
 python -m task_center show <id>
 
+# 让 failed 任务重新入队（沿用原 id，不立即执行、不读取文件）
+python -m task_center retry <id>
+
 # 指定数据库文件（默认使用项目目录下 tasks.sqlite3，首次使用自动创建）
 python -m task_center --db /path/to/tasks.sqlite3 show <id>
 ```
@@ -42,7 +45,16 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 | `input_error` | 执行时文件不可读 |
 | `data_error` | 执行时编码、表头、列数或字段不合法 |
 | `job_not_found` | 任务 id 不存在 |
-| `invalid_state` | 对非 queued 任务执行 run（原记录不变） |
+| `invalid_state` | 对非 queued 任务执行 run、或对非 failed 任务执行 retry（原记录不变） |
+
+### 重试
+
+- 仅 `failed` 任务可重试；成功后记录回到 `queued`，`result` 与 `error` 均为 null，退出码为 0。
+- retry 只修改任务状态，不读取文件也不校验 CSV：即使原文件缺失或内容仍错误也能入队。
+- 沿用原 id、任务类型与输入路径，不新增任务记录，也不立即执行；随后的 run 按原规则执行，
+  再次失败后仍可继续 retry。
+- id 不存在时返回 `job_not_found`（退出码 1，不创建记录）；对 `queued` 或 `succeeded`
+  任务重试时返回 `invalid_state` 与原状态/结果（退出码 1，原记录不变）。
 
 ### 演示
 
