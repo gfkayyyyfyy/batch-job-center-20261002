@@ -109,6 +109,23 @@ def show(conn, job_id):
     return _row_to_record(_get_job(conn, job_id))
 
 
+def retry(conn, job_id):
+    """把 failed 任务重新置为 queued，保留原 id/类型/输入路径。
+
+    只处理任务状态，不读取文件、不校验内容，也不立即执行。
+    """
+    row = _get_job(conn, job_id)
+    _id, task_type, input_path, status, _result, _error = row
+    if status != STATUS_FAILED:
+        raise TaskError(ERR_INVALID_STATE)
+    conn.execute(
+        "UPDATE jobs SET status = ?, result = NULL, error = NULL WHERE id = ?",
+        (STATUS_QUEUED, job_id),
+    )
+    conn.commit()
+    return _record(job_id, STATUS_QUEUED, None, None)
+
+
 def _run_csv_summary(real_path):
     """执行汇总，返回结果 dict；失败抛出 TaskError。"""
     try:

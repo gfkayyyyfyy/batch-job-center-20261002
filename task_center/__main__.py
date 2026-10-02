@@ -1,4 +1,4 @@
-"""命令行入口：python -m task_center [--db PATH] <submit|run|show> ..."""
+"""命令行入口：python -m task_center [--db PATH] <submit|run|show|retry> ..."""
 
 import argparse
 import json
@@ -29,6 +29,9 @@ def build_parser():
     p_show = sub.add_parser("show", help="查询任务记录")
     p_show.add_argument("id", help="任务 id")
 
+    p_retry = sub.add_parser("retry", help="把 failed 任务重新入队（保留原 id，不立即执行）")
+    p_retry.add_argument("id", help="任务 id")
+
     return parser
 
 
@@ -55,6 +58,22 @@ def main(argv=None):
                 exit_code = 1
             else:
                 exit_code = 0 if record["status"] == core.STATUS_SUCCEEDED else 1
+        elif args.command == "retry":
+            try:
+                record = core.retry(conn, args.id)
+            except core.TaskError as exc:
+                record = {"id": args.id, "status": None, "result": None, "error": exc.code}
+                # invalid_state 时展示当前记录，便于调用方了解状态
+                if exc.code == core.ERR_INVALID_STATE:
+                    try:
+                        current = core.show(conn, args.id)
+                        current["error"] = exc.code
+                        record = current
+                    except core.TaskError:
+                        pass
+                exit_code = 1
+            else:
+                exit_code = 0
         else:  # show
             record = core.show(conn, args.id)
             exit_code = 0

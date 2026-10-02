@@ -20,6 +20,9 @@ python -m task_center run <id>
 # 查询已保存的任务记录（退出后仍可查询）
 python -m task_center show <id>
 
+# 把 failed 任务重新入队（保留原 id/类型/输入，不读取文件、不立即执行）
+python -m task_center retry <id>
+
 # 指定数据库文件（默认使用项目目录下 tasks.sqlite3，首次使用自动创建）
 python -m task_center --db /path/to/tasks.sqlite3 show <id>
 ```
@@ -33,6 +36,16 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 - 成功结果含 `row_count`（行数）、`total_amount`（金额总和）、`categories`（类别金额映射）。
 - 提交仅检查类型与路径，内容在执行时校验；失败不保留部分结果。
 
+### 重试
+
+- 只有 `failed` 任务可执行 `retry`：成功后状态回到 `queued`，`result`、`error`
+  均为 `null`，退出码 0；保留原 id、任务类型和输入路径，不新增任务记录，也不立即执行。
+- retry 只处理任务状态，不读取文件、不校验 CSV；原文件缺失或内容仍错误时也允许入队，
+  之后的 `run` 按当时文件重新校验（不可读为 `input_error`，数据不合法为 `data_error`），
+  再次失败后仍可继续 retry。
+- id 不存在时返回 `job_not_found`，退出码 1，不创建记录；对 `queued` 或 `succeeded`
+  任务 retry 返回 `invalid_state` 与原记录的状态和结果，退出码 1，数据库记录不变。
+
 ### 错误码
 
 | 错误码 | 含义 |
@@ -41,8 +54,8 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 | `invalid_input` | 提交时路径在 demo 目录外、非普通文件或文件不存在（不创建任务） |
 | `input_error` | 执行时文件不可读 |
 | `data_error` | 执行时编码、表头、列数或字段不合法 |
-| `job_not_found` | 任务 id 不存在 |
-| `invalid_state` | 对非 queued 任务执行 run（原记录不变） |
+| `job_not_found` | 任务 id 不存在（retry 不创建记录） |
+| `invalid_state` | 对非 queued 任务执行 run，或对非 failed 任务执行 retry（原记录不变） |
 
 ### 演示
 
