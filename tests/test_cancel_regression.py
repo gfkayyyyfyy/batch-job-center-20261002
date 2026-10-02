@@ -2,7 +2,8 @@
 
 通过 `python -m task_center` 子进程观察 JSON 输出与退出码，
 每个用例使用独立的临时 SQLite 数据库（--db 指定）和 demo 目录内
-专用的演示文件，测试结束仅清理自身数据，可连续重复运行。
+专用的演示文件；demo 目录缺失时自行创建，测试结束仅清理自身数据，
+可连续重复运行。
 
 运行方式（项目根目录下，仅需 Python 3 标准库）：
 
@@ -43,6 +44,12 @@ class CancelRegressionTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="task_center_cancel_test_")
         self.addCleanup(self._tmp.cleanup)
         self.db = str(Path(self._tmp.name) / "tasks.sqlite3")
+        # 演示目录：不存在时由本用例创建，结束后仅在该目录由本用例创建
+        # 且已清空时移除；原本存在的目录无论是否为空一律保留。
+        self._demo_dir_created = not DEMO_DIR.exists()
+        if self._demo_dir_created:
+            DEMO_DIR.mkdir()
+        self.addCleanup(self._remove_demo_dir)
         # 演示文件若已存在则拒绝覆盖，保证只清理自身数据。
         if DEMO_FILE.exists():
             self.fail("演示文件已存在，为避免误删他人数据而中止：%s" % DEMO_FILE)
@@ -52,6 +59,15 @@ class CancelRegressionTest(unittest.TestCase):
         try:
             DEMO_FILE.unlink()
         except FileNotFoundError:
+            pass
+
+    def _remove_demo_dir(self):
+        # 只回收本用例创建的目录；目录中仍有其他文件时保留目录及文件。
+        if not self._demo_dir_created:
+            return
+        try:
+            DEMO_DIR.rmdir()
+        except OSError:
             pass
 
     # --- 辅助方法 -------------------------------------------------------
