@@ -187,7 +187,12 @@ def _run_csv_summary(real_path):
     except OSError:
         raise TaskError(ERR_INPUT)
 
-    rows = [row for row in csv.reader(io.StringIO(text)) if row]
+    try:
+        rows = [row for row in csv.reader(io.StringIO(text)) if row]
+    except csv.Error:
+        # 解析器拒绝的数据（如字段超过默认长度上限）同样属于数据问题，
+        # 归类为 data_error，不把底层异常文字暴露给调用方或写入记录。
+        raise TaskError(ERR_DATA)
     if not rows:
         raise TaskError(ERR_DATA)
     if [cell.strip() for cell in rows[0]] != ["category", "amount"]:

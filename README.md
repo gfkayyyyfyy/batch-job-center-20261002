@@ -68,7 +68,7 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 | `invalid_input` | 提交时路径在 demo 目录外、非普通文件或文件不存在（不创建任务，不占用键） |
 | `request_conflict` | 请求键已绑定其他任务类型或输入路径（不检查新路径、不修改原任务） |
 | `input_error` | 执行时文件不可读 |
-| `data_error` | 执行时编码、表头、列数或字段不合法 |
+| `data_error` | 执行时编码、表头、列数或字段不合法，或数据被 CSV 解析器拒绝（如字段超过默认长度上限） |
 | `job_not_found` | 任务 id 不存在 |
 | `invalid_state` | 对非 queued 任务执行 run 或 cancel、或对非 failed 任务执行 retry（原记录不变） |
 
@@ -101,6 +101,9 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 ### 回归测试
 
 `tests/test_retry_regression.py` 覆盖失败任务显式重试（retry）的公开行为，
+`tests/test_csv_parse_error_regression.py` 覆盖字段超过解析器默认长度上限、
+被 CSV 解析器拒绝时的失败落库、再次 run 的 invalid_state、show 持久化与
+retry 恢复，
 `tests/test_cancel_regression.py` 覆盖排队任务取消（cancel）的公开行为，
 `tests/test_request_key_regression.py` 覆盖提交去重（--request-key）的公开行为，
 `tests/test_legacy_db_regression.py` 覆盖旧版 SQLite 数据库（jobs 表仅六列、
@@ -108,7 +111,7 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 仅需 Python 3 标准库，在项目根目录运行：
 
 ```bash
-python -m unittest tests.test_retry_regression tests.test_cancel_regression tests.test_request_key_regression tests.test_legacy_db_regression -v
+python -m unittest tests.test_retry_regression tests.test_cancel_regression tests.test_request_key_regression tests.test_legacy_db_regression tests.test_csv_parse_error_regression -v
 ```
 
 测试通过 `python -m task_center` 子进程观察 JSON 输出与退出码。演示数据由测试
