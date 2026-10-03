@@ -79,7 +79,10 @@ class RequestKeyRegressionTest(unittest.TestCase):
         DEMO_FILE.write_text(text, encoding="utf-8")
 
     def _cli(self, *args, db=None):
-        """调用 python -m task_center，返回 (退出码, 解析后的 JSON 记录)。"""
+        """调用 python -m task_center，返回 (退出码, 解析后的 JSON 记录)。
+
+        标准输出必须恰为一个 JSON 对象（单行、无额外输出）。
+        """
         proc = subprocess.run(
             [sys.executable, "-m", "task_center", "--db", db or self.db, *args],
             cwd=str(PROJECT_ROOT),
@@ -87,7 +90,14 @@ class RequestKeyRegressionTest(unittest.TestCase):
             text=True,
         )
         self.assertTrue(proc.stdout.strip(), "CLI 应输出一行 JSON：%r" % proc.stderr)
-        return proc.returncode, json.loads(proc.stdout)
+        self.assertEqual(
+            len(proc.stdout.strip().splitlines()),
+            1,
+            "标准输出应恰为一行 JSON：%r" % proc.stdout,
+        )
+        record = json.loads(proc.stdout)
+        self.assertIsInstance(record, dict, record)
+        return proc.returncode, record
 
     def _submit(self, task_type, input_path, request_key=None, db=None):
         args = ["submit", task_type, "--input", input_path]
@@ -193,6 +203,95 @@ class RequestKeyRegressionTest(unittest.TestCase):
         self.assertEqual(code, 0, again)
         self.assertEqual(again, cancelled)
         self.assertEqual(self._job_count(), 1)
+
+    # --- 失败 → 重新入队 → 再次成功：键绑定始终返回原任务当前记录 -----------
+
+    def test_failed_retry_and_succeed_keeps_request_key_binding(self):
+        key = "retry-key"
+
+        # 登记：专用文件首行 category,amount，数据行 a,x（金额非法）。
+        self._write_demo("category,amount\na,x\n")
+        code, queued = self._submit("csv_summary", DEMO_INPUT, request_key=key)
+        job_id = self._assert_queued(code, queued)
+        self.assertEqual(self._job_count(), 1)
+        show_code, shown = self._show(job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, queued)
+
+        # 执行失败：退出码 1，failed，error 为 data_error，result 为 null。
+        code, failed = self._cli("run", job_id)
+        self.assertEqual(code, 1, failed)
+        self.assertEqual(
+            failed,
+            {"id": job_id, "status": "failed", "result": None, "error": "data_error"},
+        )
+        self.assertEqual(self._job_count(), 1)
+        show_code, shown = self._show(job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, failed)
+
+        # 删除文件后同键、同类型、同路径原字符串再次提交：退出码 0，
+        # 完整返回原失败记录，不新增任务、不再检查文件。
+        DEMO_FILE.unlink()
+        self.assertFalse(DEMO_FILE.exists())
+        code, again = self._submit("csv_summary", DEMO_INPUT, request_key=key)
+        self.assertEqual(code, 0, again)
+        self.assertEqual(again, failed)
+        self.assertEqual(self._job_count(), 1)
+        show_code, shown = self._show(job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, failed)
+
+        # 文件仍缺失时 retry：退出码 0，保留原 id，回到 queued，
+        # result 与 error 清为 null（retry 不解除请求键绑定）。
+        code, requeued = self._cli("retry", job_id)
+        self.assertEqual(code, 0, requeued)
+        self.assertEqual(
+            requeued,
+            {"id": job_id, "status": "queued", "result": None, "error": None},
+        )
+        self.assertEqual(self._job_count(), 1)
+        show_code, shown = self._show(job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, requeued)
+
+        # 文件仍缺失时同键提交：返回相同排队记录，不重新检查文件或执行任务。
+        code, again = self._submit("csv_summary", DEMO_INPUT, request_key=key)
+        self.assertEqual(code, 0, again)
+        self.assertEqual(again, requeued)
+        self.assertEqual(self._job_count(), 1)
+        show_code, shown = self._show(job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, requeued)
+
+        # 恢复带原表头的有效数据 a,10、b,20、a,5 后执行原 id：
+        # 退出码 0，succeeded，row_count 3、total_amount 35、
+        # categories {"a":15,"b":20}，error 为 null。
+        self._write_demo(VALID_CSV)
+        code, succeeded = self._cli("run", job_id)
+        self.assertEqual(code, 0, succeeded)
+        self.assertEqual(
+            succeeded,
+            {
+                "id": job_id,
+                "status": "succeeded",
+                "result": VALID_RESULT,
+                "error": None,
+            },
+        )
+        self.assertEqual(self._job_count(), 1)
+        show_code, shown = self._show(job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, succeeded)
+
+        # 再次同键提交：完整返回该成功记录，数据库仍只有一条任务。
+        code, again = self._submit("csv_summary", DEMO_INPUT, request_key=key)
+        self.assertEqual(code, 0, again)
+        self.assertEqual(again, succeeded)
+        self.assertEqual(self._job_count(), 1)
+        show_code, shown = self._show(job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, succeeded)
 
     # --- 路径原字符串匹配 -------------------------------------------------
 
