@@ -40,6 +40,13 @@ SPACED_EXPECTED = {
 HEADER_ONLY_CSV = "category,amount\n"
 HEADER_ONLY_EXPECTED = {"row_count": 0, "total_amount": 0, "categories": {}}
 
+# 末行类别为连续 200000 个 a，超过标准 CSV 解析器的默认字段上限
+# （csv.field_size_limit() 默认 131072），解析器自身抛出 csv.Error。
+OVERSIZE_FIELD_CSV = "category,amount\na,10\n" + "a" * 200000 + ",1\n"
+
+FIXED_CSV = "category,amount\na,10\n"
+FIXED_EXPECTED = {"row_count": 1, "total_amount": 10, "categories": {"a": 10}}
+
 
 class CsvSummaryRegressionTest(unittest.TestCase):
     """csv_summary 数据校验与结果留存的公开行为：JSON 响应与退出码。"""
@@ -79,6 +86,11 @@ class CsvSummaryRegressionTest(unittest.TestCase):
 
     def _cli(self, *args):
         """调用 python -m task_center，返回 (退出码, 解析后的 JSON 记录)。"""
+        code, record, _stderr = self._cli_full(*args)
+        return code, record
+
+    def _cli_full(self, *args):
+        """同 _cli，但额外返回 stderr，供需要检查异常输出的用例使用。"""
         proc = subprocess.run(
             [sys.executable, "-m", "task_center", "--db", self.db, *args],
             cwd=str(PROJECT_ROOT),
@@ -86,7 +98,7 @@ class CsvSummaryRegressionTest(unittest.TestCase):
             text=True,
         )
         self.assertTrue(proc.stdout.strip(), "CLI 应输出一行 JSON：%r" % proc.stderr)
-        return proc.returncode, json.loads(proc.stdout)
+        return proc.returncode, json.loads(proc.stdout), proc.stderr
 
     def _submit(self):
         """提交合法路径：退出码 0，queued，result 与 error 均为 null。"""
@@ -103,6 +115,9 @@ class CsvSummaryRegressionTest(unittest.TestCase):
 
     def _show(self, job_id):
         return self._cli("show", job_id)
+
+    def _retry(self, job_id):
+        return self._cli("retry", job_id)
 
     def _assert_run_succeeds(self, job_id, expected_result):
         """run 成功：退出码 0，同一 id、succeeded、error 为 null、结果精确匹配。"""
@@ -200,6 +215,61 @@ class CsvSummaryRegressionTest(unittest.TestCase):
         self.assertEqual(
             shown, {"id": job_id, "status": "failed", "result": None, "error": "data_error"}
         )
+
+    # --- 解析器自身拒绝（csv.Error）也进入失败路径 -------------------------
+
+    def test_oversize_field_parser_error_fails_with_data_error(self):
+        # submit 不检查内容，照常排队。
+        self._write_demo(OVERSIZE_FIELD_CSV)
+        job_id = self._submit()
+
+        # run 把解析器拒绝归为 data_error：退出码 1，单行 JSON，
+        # 不输出异常堆栈，也不把底层异常文字写进记录。
+        code, record, stderr = self._cli_full("run", job_id)
+        self.assertEqual(code, 1, record)
+        self.assertEqual(
+            record, {"id": job_id, "status": "failed", "result": None, "error": "data_error"}
+        )
+        self.assertNotIn("Traceback", stderr)
+        self.assertNotIn("csv.Error", stderr)
+
+        # 任务不留在 queued，也不保留前面合法行的部分汇总：新进程中
+        # show 退出 0，返回与执行响应完全相同的失败记录。
+        show_code, shown = self._show(job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, record)
+
+        # 再次 run 按原有状态规则拒绝为 invalid_state。
+        code, record = self._run(job_id)
+        self.assertEqual(code, 1, record)
+        self.assertEqual(
+            record,
+            {"id": job_id, "status": "failed", "result": None, "error": "invalid_state"},
+        )
+
+        # 后续 show 仍保存 data_error 失败记录。
+        show_code, shown = self._show(job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(
+            shown, {"id": job_id, "status": "failed", "result": None, "error": "data_error"}
+        )
+
+    def test_oversize_field_failure_retry_after_fix_succeeds(self):
+        self._write_demo(OVERSIZE_FIELD_CSV)
+        job_id = self._submit()
+        self._assert_run_fails_with_data_error(job_id)
+
+        # 把同一路径文件改成合法内容后，retry 沿用原 id 回到 queued
+        # 并清空结果和错误。
+        self._write_demo(FIXED_CSV)
+        code, record = self._retry(job_id)
+        self.assertEqual(code, 0, record)
+        self.assertEqual(
+            record, {"id": job_id, "status": "queued", "result": None, "error": None}
+        )
+
+        # 随后的 run 成功，结果精确匹配。
+        self._assert_run_succeeds(job_id, FIXED_EXPECTED)
 
 
 if __name__ == "__main__":
