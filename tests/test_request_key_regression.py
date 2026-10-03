@@ -41,6 +41,9 @@ VALID_RESULT = {
     "categories": {"a": 15, "b": 20},
 }
 
+# 非法 CSV：表头正确但金额不是整数，run 时应得 data_error。
+INVALID_CSV = "category,amount\na,x\n"
+
 # demo 内保证不存在的项目相对路径。
 MISSING_INPUT = "demo/request_key_regression_missing_file.csv"
 
@@ -88,6 +91,36 @@ class RequestKeyRegressionTest(unittest.TestCase):
         )
         self.assertTrue(proc.stdout.strip(), "CLI 应输出一行 JSON：%r" % proc.stderr)
         return proc.returncode, json.loads(proc.stdout)
+
+    def _cli_exact(self, *args, db=None):
+        """与 _cli 相同，但额外核对标准输出恰为一个 JSON 对象。
+
+        输出必须以单个 JSON 对象结尾，且该对象之后只有行终止符；
+        stderr 必须为空。本场景的每个关键阶段都用它观察结果。
+        """
+        proc = subprocess.run(
+            [sys.executable, "-m", "task_center", "--db", db or self.db, *args],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.stderr, "", "CLI 不应向标准错误输出：%r" % proc.stderr)
+        self.assertNotEqual(proc.stdout, "", "CLI 必须输出一个 JSON 对象")
+        self.assertIn(
+            proc.stdout[-1],
+            ("\n", "}"),
+            "输出末尾只能是对象闭合括号或行终止符：%r" % proc.stdout,
+        )
+        body = proc.stdout[:-1] if proc.stdout.endswith("\n") else proc.stdout
+        self.assertNotIn("\n", body, "标准输出中只能有一个 JSON 对象：%r" % proc.stdout)
+        record = json.loads(body)
+        self.assertIsInstance(record, dict, "标准输出必须恰为一个 JSON 对象：%r" % proc.stdout)
+        self.assertEqual(
+            proc.stdout,
+            json.dumps(record, ensure_ascii=False) + "\n",
+            "标准输出应恰为该 JSON 对象加一个换行：%r" % proc.stdout,
+        )
+        return proc.returncode, record
 
     def _submit(self, task_type, input_path, request_key=None, db=None):
         args = ["submit", task_type, "--input", input_path]
@@ -193,6 +226,120 @@ class RequestKeyRegressionTest(unittest.TestCase):
         self.assertEqual(code, 0, again)
         self.assertEqual(again, cancelled)
         self.assertEqual(self._job_count(), 1)
+
+    # --- 失败、重试入队、再次成功：请求键绑定贯穿全程 -----------------------
+
+    def test_same_key_returns_saved_record_through_failure_retry_success(self):
+        """失败 → 删文件重复提交 → retry 入队 → 修复后成功：同键始终返回原记录。"""
+        key = "retry-key"
+        queued_record = {
+            "id": None,  # 占位，下面以实际 id 比较
+            "status": "queued",
+            "result": None,
+            "error": None,
+        }
+        failed_record = {
+            "id": None,
+            "status": "failed",
+            "result": None,
+            "error": "data_error",
+        }
+        succeeded_record = {"id": None, "status": "succeeded", "result": VALID_RESULT, "error": None}
+
+        def with_id(template, job_id):
+            expected = dict(template)
+            expected["id"] = job_id
+            return expected
+
+        # 1) 以非法数据（a,x）提交：退出 0，queued，result/error 均为 null。
+        self._write_demo(INVALID_CSV)
+        code, submitted = self._cli_exact(
+            "submit", "csv_summary", "--input", DEMO_INPUT, "--request-key", key
+        )
+        job_id = self._assert_queued(code, submitted)
+        self.assertEqual(self._job_count(), 1)
+
+        # 关键阶段独立 show：退出 0，持久化记录与提交响应一致。
+        show_code, shown = self._cli_exact("show", job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, submitted)
+        self.assertEqual(shown, with_id(queued_record, job_id))
+        self.assertEqual(self._job_count(), 1)
+
+        # 2) run：退出 1，failed，error 为 data_error，result 为 null。
+        code, ran = self._cli_exact("run", job_id)
+        self.assertEqual(code, 1, ran)
+        self.assertEqual(ran, with_id(failed_record, job_id))
+
+        show_code, shown = self._cli_exact("show", job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, ran)
+        self.assertEqual(self._job_count(), 1)
+
+        # 3) 删除文件后同键、同类型、同路径原字符串再次提交：退出 0，
+        #    完整返回原失败记录，不重新检查文件，不新增任务。
+        DEMO_FILE.unlink()
+        self.assertFalse(DEMO_FILE.exists())
+        code, again = self._cli_exact(
+            "submit", "csv_summary", "--input", DEMO_INPUT, "--request-key", key
+        )
+        self.assertEqual(code, 0, again)
+        self.assertEqual(again, with_id(failed_record, job_id))
+        self.assertEqual(self._job_count(), 1)
+
+        show_code, shown = self._cli_exact("show", job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, with_id(failed_record, job_id))
+        self.assertEqual(self._job_count(), 1)
+
+        # 4) 文件仍缺失时 retry：退出 0，保留原 id，回到 queued，
+        #    result、error 清为 null。
+        code, retried = self._cli_exact("retry", job_id)
+        self.assertEqual(code, 0, retried)
+        self.assertEqual(retried, with_id(queued_record, job_id))
+
+        show_code, shown = self._cli_exact("show", job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, retried)
+        self.assertEqual(self._job_count(), 1)
+
+        # 5) 文件仍缺失时同键提交：返回相同排队记录，
+        #    不重新检查文件（否则会得到 invalid_input），也不执行任务。
+        code, again = self._cli_exact(
+            "submit", "csv_summary", "--input", DEMO_INPUT, "--request-key", key
+        )
+        self.assertEqual(code, 0, again)
+        self.assertEqual(again, retried)
+        self.assertEqual(self._job_count(), 1)
+
+        show_code, shown = self._cli_exact("show", job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, retried)
+        self.assertEqual(self._job_count(), 1)
+
+        # 6) 恢复带原表头的合法数据后执行原 id：退出 0，succeeded，
+        #    row_count 3、total_amount 35、categories {"a":15,"b":20}。
+        self._write_demo(VALID_CSV)
+        code, ran = self._cli_exact("run", job_id)
+        self.assertEqual(code, 0, ran)
+        self.assertEqual(ran, with_id(succeeded_record, job_id))
+
+        show_code, shown = self._cli_exact("show", job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, ran)
+        self.assertEqual(self._job_count(), 1)
+
+        # 7) 再次同键提交：完整返回该成功记录，仍只有一条任务。
+        code, again = self._cli_exact(
+            "submit", "csv_summary", "--input", DEMO_INPUT, "--request-key", key
+        )
+        self.assertEqual(code, 0, again)
+        self.assertEqual(again, ran)
+        self.assertEqual(self._job_count(), 1)
+
+        show_code, shown = self._cli_exact("show", job_id)
+        self.assertEqual(show_code, 0, shown)
+        self.assertEqual(shown, ran)
 
     # --- 路径原字符串匹配 -------------------------------------------------
 
