@@ -1,7 +1,6 @@
 """任务中心核心逻辑：SQLite 存储与 csv_summary 任务执行。"""
 
 import csv
-import io
 import json
 import os
 import re
@@ -178,40 +177,65 @@ def cancel(conn, job_id):
 
 
 def _run_csv_summary(real_path):
-    """执行汇总，返回结果 dict；失败抛出 TaskError。"""
+    """执行汇总，返回结果 dict；失败抛出 TaskError。
+
+    流式逐行读取与解析：直接让 csv.reader 迭代文件对象（字段内含
+    换行时由解析器自行继续取下一物理行），不保留整份文件文本，也
+    不物化全部解析行。工作内存只随类别数量、当前记录大小以及文件
+    对象的读取缓冲增长，与数据行数无关。
+    """
     try:
-        with open(real_path, "r", encoding="utf-8", newline="") as fh:
-            text = fh.read()
-    except UnicodeDecodeError:
-        raise TaskError(ERR_DATA)
+        fh = open(real_path, "r", encoding="utf-8", newline="")
     except OSError:
         raise TaskError(ERR_INPUT)
-
-    try:
-        rows = [row for row in csv.reader(io.StringIO(text)) if row]
-    except csv.Error:
-        # 解析器拒绝的数据（如字段超过默认长度上限）同样属于数据问题，
-        # 归类为 data_error，不把底层异常文字暴露给调用方或写入记录。
-        raise TaskError(ERR_DATA)
-    if not rows:
-        raise TaskError(ERR_DATA)
-    if [cell.strip() for cell in rows[0]] != ["category", "amount"]:
-        raise TaskError(ERR_DATA)
 
     row_count = 0
     total_amount = 0
     categories = {}
-    for row in rows[1:]:
-        if len(row) != 2:
-            raise TaskError(ERR_DATA)
-        category = row[0].strip()
-        amount = row[1].strip()
-        if not category or not _AMOUNT_RE.fullmatch(amount):
-            raise TaskError(ERR_DATA)
-        value = int(amount)
-        row_count += 1
-        total_amount += value
-        categories[category] = categories.get(category, 0) + value
+    header_seen = False
+    try:
+        reader = csv.reader(fh)
+        while True:
+            try:
+                row = next(reader)
+            except StopIteration:
+                break
+            except UnicodeDecodeError:
+                # 非合法 UTF-8 属于数据问题；逐行解码下可能在读取
+                # 到若干合法记录之后才暴露。
+                raise TaskError(ERR_DATA)
+            except csv.Error:
+                # 解析器拒绝的数据（如字段超过默认长度上限）同样属于数据问题，
+                # 归类为 data_error，不把底层异常文字暴露给调用方或写入记录。
+                raise TaskError(ERR_DATA)
+            except OSError:
+                # 打开成功后逐行读取失败，与一次性读取失败同为输入问题。
+                raise TaskError(ERR_INPUT)
+            if not row:
+                # 完全空行解析为空列表：一律忽略，不计入数据行；
+                # 表头之前的空行同样跳过，故首个非空记录才是表头。
+                continue
+            if not header_seen:
+                if [cell.strip() for cell in row] != ["category", "amount"]:
+                    raise TaskError(ERR_DATA)
+                header_seen = True
+                continue
+            if len(row) != 2:
+                raise TaskError(ERR_DATA)
+            category = row[0].strip()
+            amount = row[1].strip()
+            if not category or not _AMOUNT_RE.fullmatch(amount):
+                raise TaskError(ERR_DATA)
+            value = int(amount)
+            row_count += 1
+            total_amount += value
+            categories[category] = categories.get(category, 0) + value
+    finally:
+        fh.close()
+
+    if not header_seen:
+        # 空文件或仅含完全空行：过滤后无任何记录。
+        raise TaskError(ERR_DATA)
 
     return {
         "row_count": row_count,
