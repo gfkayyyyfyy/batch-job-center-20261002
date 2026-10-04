@@ -33,7 +33,12 @@ def build_parser():
     p_run.add_argument("id", help="任务 id")
 
     p_show = sub.add_parser("show", help="查询任务记录")
-    p_show.add_argument("id", help="任务 id")
+    p_show.add_argument("id", nargs="?", default=None, help="任务 id")
+    p_show.add_argument(
+        "--request-key",
+        default=None,
+        help="按请求键查询已绑定的任务（与位置参数 id 二选一）",
+    )
 
     p_retry = sub.add_parser("retry", help="让 failed 任务重新入队（不立即执行）")
     p_retry.add_argument("id", help="任务 id")
@@ -84,7 +89,11 @@ def _dispatch(conn, action, job_id, success_exit_code):
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "show" and (args.id is None) == (args.request_key is None):
+        # id 与 --request-key 必须且只能提供一个：按参数解析失败处理。
+        parser.error("show 需要且只能提供一个任务 id 或 --request-key")
     conn = core.connect(args.db)
     try:
         if args.command == "submit":
@@ -101,7 +110,10 @@ def main(argv=None):
         elif args.command == "cancel":
             record, exit_code = _dispatch(conn, core.cancel, args.id, lambda _r: 0)
         else:  # show
-            record = core.show(conn, args.id)
+            if args.request_key is not None:
+                record = core.show_by_request_key(conn, args.request_key)
+            else:
+                record = core.show(conn, args.id)
             exit_code = 0
     except core.TaskError as exc:
         # submit 的参数没有 id（getattr 回退为 None）；show 等命令则回显传入 id。
