@@ -29,6 +29,9 @@ python -m task_center show --request-key sales-1
 # 让 failed 任务重新入队（沿用原 id，不立即执行、不读取文件）
 python -m task_center retry <id>
 
+# 按请求键重试已绑定的 failed 任务（与 id 二选一，只保存请求键也能重试）
+python -m task_center retry --request-key sales-1
+
 # 取消一个 queued 任务（保留记录，不再执行、不读取文件）
 python -m task_center cancel <id>
 
@@ -97,6 +100,19 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 - id 不存在时返回 `job_not_found`（退出码 1，不创建记录）；对 `queued` 或 `succeeded`
   任务重试时返回 `invalid_state` 与原状态/结果（退出码 1，原记录不变）。
 
+### 按请求键重试（retry --request-key）
+
+- `retry` 接受任务 id 或 `--request-key` 之一；同时提供或都不提供时按参数解析失败
+  处理（退出码 2，用法提示写标准错误，标准输出不输出 JSON，不创建数据库文件）。
+- 键的合法性规则与提交、查询时相同；非法键返回 `invalid_request_key`，合法但未绑定
+  的键返回 `job_not_found`（两者 id/status/result 均为 null，退出码 1，先检查键格式
+  再查绑定）。
+- 绑定任务为 `failed` 时重新入队：返回真实 id 与 `queued` 状态，`result` 与 `error`
+  均为 null，退出码 0；保留任务类型、输入路径与键绑定，不新增任务，不读取或校验
+  输入文件（原文件缺失或仍含错误数据同样入队），也不立即执行汇总。
+- 绑定任务为 `queued`、`succeeded` 或 `cancelled` 时返回真实 id、当前状态与已保存的
+  `result`，仅响应 `error` 为 `invalid_state`（退出码 1），任务记录与键绑定均不变。
+
 ### 取消
 
 - 仅 `queued` 任务可取消；成功后同一条记录变为 `cancelled`，`result` 与 `error` 均为 null，
@@ -113,6 +129,9 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 
 `demo/sales.csv` 内容为 `a,10`、`b,20`、`a,5`，执行后结果为
 `{"row_count": 3, "total_amount": 35, "categories": {"a": 15, "b": 20}}`。
+`demo/retry_by_key.csv` 内容为 `a,x`（金额非法），用于演示按请求键重试：
+以其提交并执行得到 `failed`/`data_error` 后，`retry --request-key` 不读取
+该文件即可重新入队。
 
 ### 回归测试
 
@@ -124,12 +143,14 @@ retry 恢复，
 `tests/test_request_key_regression.py` 覆盖提交去重（--request-key）的公开行为，
 `tests/test_show_request_key_regression.py` 覆盖按请求键查询（show --request-key）
 的公开行为，
+`tests/test_retry_request_key_regression.py` 覆盖按请求键重试（retry --request-key）
+的公开行为，
 `tests/test_legacy_db_regression.py` 覆盖旧版 SQLite 数据库（jobs 表仅六列、
 无 request_key 列）首次使用与再次打开时的自动兼容及旧库上的请求键行为，
 仅需 Python 3 标准库，在项目根目录运行：
 
 ```bash
-python -m unittest tests.test_retry_regression tests.test_cancel_regression tests.test_request_key_regression tests.test_show_request_key_regression tests.test_legacy_db_regression tests.test_csv_parse_error_regression -v
+python -m unittest tests.test_retry_regression tests.test_cancel_regression tests.test_request_key_regression tests.test_show_request_key_regression tests.test_retry_request_key_regression tests.test_legacy_db_regression tests.test_csv_parse_error_regression -v
 ```
 
 测试通过 `python -m task_center` 子进程观察 JSON 输出与退出码。演示数据由测试
@@ -140,6 +161,8 @@ python -m unittest tests.test_retry_regression tests.test_cancel_regression test
 不读取文件）与 `request_key_regression_case.csv`（`a,10`、`b,20`、`a,5`，验证同键
 去重、冲突与键合法性）与 `show_request_key_regression_case.csv`（同为
 `a,10`、`b,20`、`a,5`，验证按键查询各状态记录、键合法性与参数组合失败）与
+`retry_request_key_regression_case.csv`（非法内容 `a,x` 制造 `data_error`
+失败任务，验证按键重试、状态拒绝与参数组合失败）与
 `legacy_db_regression_case.csv`（同为 `a,10`、
 `b,20`、`a,5`，配合手工建立的六列旧库验证迁移后旧记录可读与带键提交），并通过 `--db` 使用临时目录下的独立 SQLite 数据库。同名样例若已存在，
 对应模块直接失败且不改动该文件。测试不依赖预置

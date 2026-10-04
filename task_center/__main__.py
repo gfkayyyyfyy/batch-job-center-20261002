@@ -41,30 +41,40 @@ def build_parser():
     )
 
     p_retry = sub.add_parser("retry", help="让 failed 任务重新入队（不立即执行）")
-    p_retry.add_argument("id", help="任务 id")
+    p_retry.add_argument("id", nargs="?", default=None, help="任务 id")
+    p_retry.add_argument(
+        "--request-key",
+        default=None,
+        help="按请求键重试已绑定的任务（与 id 二选一）",
+    )
 
     p_cancel = sub.add_parser("cancel", help="取消一个 queued 任务（保留记录，不再执行）")
     p_cancel.add_argument("id", help="任务 id")
 
     # 供 main 在 id 与 --request-key 组合非法时按参数解析失败的方式报错。
     parser.show_parser = p_show
+    parser.retry_parser = p_retry
 
     return parser
 
 
-def _rejection_record(conn, job_id, exc):
+def _rejection_record(conn, job_id, exc, lookup=None):
     """把业务异常统一转换为拒绝响应记录（不写数据库）。
 
     默认回显传入 id，status/result 为 null，error 为异常错误码；
     invalid_state 表示任务存在但当前状态不允许该操作，此时附带已
     保存记录的 status/result，仅把本次响应的 error 改为
     invalid_state，便于调用方了解状态。若任务此时查不到（如
-    job_not_found），则保留默认响应。
+    job_not_found），则保留默认响应。lookup 指定 invalid_state 时
+    重新读取记录的方式，默认按 id 查询；按请求键定位的操作传入按
+    键查询，且 job_id 为 None（拒绝响应的 id 为 null）。
     """
     record = {"id": job_id, "status": None, "result": None, "error": exc.code}
     if exc.code == core.ERR_INVALID_STATE:
+        if lookup is None:
+            lookup = lambda: core.show(conn, job_id)
         try:
-            current = core.show(conn, job_id)
+            current = lookup()
         except core.TaskError:
             pass
         else:
@@ -78,7 +88,7 @@ def _exit_code_on_success(record):
     return 0 if record["status"] == core.STATUS_SUCCEEDED else 1
 
 
-def _dispatch(conn, action, job_id, success_exit_code):
+def _dispatch(conn, action, job_id, success_exit_code, lookup=None):
     """执行 run/retry/cancel 这类按 id 的操作，统一处理拒绝响应。
 
     成功时由 success_exit_code 依据返回记录决定退出码；业务异常
@@ -87,7 +97,7 @@ def _dispatch(conn, action, job_id, success_exit_code):
     try:
         record = action(conn, job_id)
     except core.TaskError as exc:
-        return _rejection_record(conn, job_id, exc), 1
+        return _rejection_record(conn, job_id, exc, lookup=lookup), 1
     return record, success_exit_code(record)
 
 
@@ -98,6 +108,9 @@ def main(argv=None):
         # id 与 --request-key 必须且只能提供一个：按参数解析失败处理，
         # 用法提示写标准错误、退出码 2，标准输出不输出 JSON。
         parser.show_parser.error("show 需要且只能提供 id 或 --request-key 之一")
+    if args.command == "retry" and (args.id is None) == (args.request_key is None):
+        # 与 show 同一规则：参数解析失败，退出码 2，不连接（也不创建）数据库。
+        parser.retry_parser.error("retry 需要且只能提供 id 或 --request-key 之一")
     conn = core.connect(args.db)
     try:
         if args.command == "submit":
@@ -110,7 +123,20 @@ def main(argv=None):
                 conn, core.run, args.id, _exit_code_on_success
             )
         elif args.command == "retry":
-            record, exit_code = _dispatch(conn, core.retry, args.id, lambda _r: 0)
+            if args.request_key is not None:
+                record, exit_code = _dispatch(
+                    conn,
+                    lambda conn, _id: core.retry_by_request_key(
+                        conn, args.request_key
+                    ),
+                    None,
+                    lambda _r: 0,
+                    lookup=lambda: core.show_by_request_key(
+                        conn, args.request_key
+                    ),
+                )
+            else:
+                record, exit_code = _dispatch(conn, core.retry, args.id, lambda _r: 0)
         elif args.command == "cancel":
             record, exit_code = _dispatch(conn, core.cancel, args.id, lambda _r: 0)
         else:  # show
