@@ -30,7 +30,12 @@ def build_parser():
     )
 
     p_run = sub.add_parser("run", help="手动执行一个 queued 任务")
-    p_run.add_argument("id", help="任务 id")
+    p_run.add_argument("id", nargs="?", default=None, help="任务 id")
+    p_run.add_argument(
+        "--request-key",
+        default=None,
+        help="按请求键执行已绑定的任务（与 id 二选一）",
+    )
 
     p_show = sub.add_parser("show", help="查询任务记录")
     p_show.add_argument("id", nargs="?", default=None, help="任务 id")
@@ -57,6 +62,7 @@ def build_parser():
     )
 
     # 供 main 在 id 与 --request-key 组合非法时按参数解析失败的方式报错。
+    parser.run_parser = p_run
     parser.show_parser = p_show
     parser.retry_parser = p_retry
     parser.cancel_parser = p_cancel
@@ -110,6 +116,10 @@ def _dispatch(conn, action, job_id, success_exit_code, lookup=None):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "run" and (args.id is None) == (args.request_key is None):
+        # id 与 --request-key 必须且只能提供一个：按参数解析失败处理，
+        # 用法提示写标准错误、退出码 2，标准输出不输出 JSON，不连接（也不创建）数据库。
+        parser.run_parser.error("run 需要且只能提供 id 或 --request-key 之一")
     if args.command == "show" and (args.id is None) == (args.request_key is None):
         # id 与 --request-key 必须且只能提供一个：按参数解析失败处理，
         # 用法提示写标准错误、退出码 2，标准输出不输出 JSON。
@@ -128,9 +138,22 @@ def main(argv=None):
             )
             exit_code = 0
         elif args.command == "run":
-            record, exit_code = _dispatch(
-                conn, core.run, args.id, _exit_code_on_success
-            )
+            if args.request_key is not None:
+                record, exit_code = _dispatch(
+                    conn,
+                    lambda conn, _id: core.run_by_request_key(
+                        conn, args.request_key
+                    ),
+                    None,
+                    _exit_code_on_success,
+                    lookup=lambda: core.show_by_request_key(
+                        conn, args.request_key
+                    ),
+                )
+            else:
+                record, exit_code = _dispatch(
+                    conn, core.run, args.id, _exit_code_on_success
+                )
         elif args.command == "retry":
             if args.request_key is not None:
                 record, exit_code = _dispatch(
