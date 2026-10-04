@@ -1,7 +1,6 @@
 """任务中心核心逻辑：SQLite 存储与 csv_summary 任务执行。"""
 
 import csv
-import io
 import json
 import os
 import re
@@ -178,40 +177,53 @@ def cancel(conn, job_id):
 
 
 def _run_csv_summary(real_path):
-    """执行汇总，返回结果 dict；失败抛出 TaskError。"""
+    """执行汇总，返回结果 dict；失败抛出 TaskError。
+
+    直接以文件句柄驱动 csv.reader 逐行解析：既不保留整份文件文本，
+    也不累积全部解析行，工作内存只随类别数量、当前记录大小及读取
+    缓冲增长，不随数据行数增长。
+    """
     try:
-        with open(real_path, "r", encoding="utf-8", newline="") as fh:
-            text = fh.read()
-    except UnicodeDecodeError:
-        raise TaskError(ERR_DATA)
+        fh = open(real_path, "r", encoding="utf-8", newline="")
     except OSError:
         raise TaskError(ERR_INPUT)
-
-    try:
-        rows = [row for row in csv.reader(io.StringIO(text)) if row]
-    except csv.Error:
-        # 解析器拒绝的数据（如字段超过默认长度上限）同样属于数据问题，
-        # 归类为 data_error，不把底层异常文字暴露给调用方或写入记录。
-        raise TaskError(ERR_DATA)
-    if not rows:
-        raise TaskError(ERR_DATA)
-    if [cell.strip() for cell in rows[0]] != ["category", "amount"]:
-        raise TaskError(ERR_DATA)
 
     row_count = 0
     total_amount = 0
     categories = {}
-    for row in rows[1:]:
-        if len(row) != 2:
-            raise TaskError(ERR_DATA)
-        category = row[0].strip()
-        amount = row[1].strip()
-        if not category or not _AMOUNT_RE.fullmatch(amount):
-            raise TaskError(ERR_DATA)
-        value = int(amount)
-        row_count += 1
-        total_amount += value
-        categories[category] = categories.get(category, 0) + value
+    try:
+        with fh:
+            reader = csv.reader(fh)
+            # 表头是首个非空记录：忽略它之前的完全空行。
+            header = next((row for row in reader if row), None)
+            if header is None:
+                raise TaskError(ERR_DATA)
+
+            if [cell.strip() for cell in header] != ["category", "amount"]:
+                raise TaskError(ERR_DATA)
+
+            for row in reader:
+                if not row:
+                    # 完全空行忽略；引号内的字段内换行由解析器重组进
+                    # 当前记录，不会作为独立行到达这里。
+                    continue
+                if len(row) != 2:
+                    raise TaskError(ERR_DATA)
+                category = row[0].strip()
+                amount = row[1].strip()
+                if not category or not _AMOUNT_RE.fullmatch(amount):
+                    raise TaskError(ERR_DATA)
+                value = int(amount)
+                row_count += 1
+                total_amount += value
+                categories[category] = categories.get(category, 0) + value
+    except UnicodeDecodeError:
+        raise TaskError(ERR_DATA)
+    except csv.Error:
+        raise TaskError(ERR_DATA)
+    except OSError:
+        # 读取过程中打开的句柄发生 I/O 失败属于输入问题。
+        raise TaskError(ERR_INPUT)
 
     return {
         "row_count": row_count,
