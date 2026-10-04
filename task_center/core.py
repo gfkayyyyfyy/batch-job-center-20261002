@@ -181,6 +181,36 @@ def retry(conn, job_id):
     return _record(job_id, STATUS_QUEUED, None, None)
 
 
+def retry_by_request_key(conn, request_key):
+    """让请求键绑定的 failed 任务重新入队。
+
+    与按 id 重试同一语义、作用于同一条记录：沿用原 id、任务类型、
+    输入路径与键绑定，不新增任务、不读取或校验输入文件、不立即执行
+    汇总。先校验键格式（与提交、按键查询同一规则），非法键抛
+    invalid_request_key；合法但未绑定的键抛 job_not_found；绑定任务
+    不是 failed（queued/succeeded/cancelled）时抛 invalid_state，
+    已保存记录与键绑定保持不变。
+    """
+    if not _REQUEST_KEY_RE.fullmatch(request_key):
+        raise TaskError(ERR_INVALID_REQUEST_KEY)
+    row = conn.execute(
+        "SELECT id, type, input, status, result, error FROM jobs"
+        " WHERE request_key = ?",
+        (request_key,),
+    ).fetchone()
+    if row is None:
+        raise TaskError(ERR_JOB_NOT_FOUND)
+    job_id, _task_type, _input, status, _result, _error = row
+    if status != STATUS_FAILED:
+        raise TaskError(ERR_INVALID_STATE)
+    conn.execute(
+        "UPDATE jobs SET status = ?, result = NULL, error = NULL WHERE id = ?",
+        (STATUS_QUEUED, job_id),
+    )
+    conn.commit()
+    return _record(job_id, STATUS_QUEUED, None, None)
+
+
 def cancel(conn, job_id):
     """取消 queued 任务：仅把状态改为 cancelled，不读取或校验输入文件。"""
     row = _get_job(conn, job_id)
