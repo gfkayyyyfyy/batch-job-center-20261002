@@ -307,10 +307,14 @@ def _run_csv_summary(real_path):
     }
 
 
-def run(conn, job_id):
-    """手动执行一个 queued 任务，返回最终记录。"""
-    row = _get_job(conn, job_id)
-    _id, task_type, input_path, status, _result, _error = row
+def _run_queued(conn, row):
+    """执行规则：仅 queued 任务可执行，两种定位入口共用。
+
+    按原 run 规则同步读取已保存的输入路径并持久化最终记录，沿用原
+    id，不新增任务、不解除键绑定；非 queued 时抛 invalid_state，
+    不读文件，任务记录与绑定不变。
+    """
+    job_id, task_type, input_path, status, _result, _error = row
     if status != STATUS_QUEUED:
         raise TaskError(ERR_INVALID_STATE)
 
@@ -332,3 +336,17 @@ def run(conn, job_id):
     )
     conn.commit()
     return _record(job_id, STATUS_SUCCEEDED, result, None)
+
+
+def run(conn, job_id):
+    """手动执行一个 queued 任务，返回最终记录。"""
+    return _run_queued(conn, _get_job(conn, job_id))
+
+
+def run_by_request_key(conn, request_key):
+    """按请求键执行绑定的 queued 任务，返回最终记录。
+
+    定位规则与按键查询一致，执行规则与按 id 执行一致：不新增任务、
+    不解除绑定，返回原 id 的最终记录。
+    """
+    return _run_queued(conn, _get_job_by_request_key(conn, request_key))
