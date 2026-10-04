@@ -1,4 +1,4 @@
-"""命令行入口：python -m task_center [--db PATH] <submit|run|show|retry|cancel> ..."""
+"""命令行入口：python -m task_center [--db PATH] <submit|run|show|list|retry|cancel> ..."""
 
 import argparse
 import json
@@ -43,6 +43,19 @@ def build_parser():
         "--request-key",
         default=None,
         help="按请求键查询已绑定的任务（与 id 二选一）",
+    )
+
+    p_list = sub.add_parser("list", help="列出全部任务记录（可选按状态筛选）")
+    p_list.add_argument(
+        "--status",
+        default=None,
+        choices=[
+            core.STATUS_QUEUED,
+            core.STATUS_SUCCEEDED,
+            core.STATUS_FAILED,
+            core.STATUS_CANCELLED,
+        ],
+        help="只列出该状态的任务（区分大小写的完整值；不提供时列出全部）",
     )
 
     p_retry = sub.add_parser("retry", help="让 failed 任务重新入队（不立即执行）")
@@ -184,6 +197,15 @@ def main(argv=None):
                 )
             else:
                 record, exit_code = _dispatch(conn, core.cancel, args.id, lambda _r: 0)
+        elif args.command == "list":
+            # 列表查询：外层四字段中 id/status/error 为 null，result 为记录数组。
+            record = {
+                "id": None,
+                "status": None,
+                "result": core.list_jobs(conn, args.status),
+                "error": None,
+            }
+            exit_code = 0
         else:  # show
             if args.request_key is not None:
                 record = core.show_by_request_key(conn, args.request_key)
