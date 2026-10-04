@@ -148,56 +148,40 @@ def show(conn, job_id):
     return _row_to_record(_get_job(conn, job_id))
 
 
+def _get_job_by_request_key(conn, request_key):
+    """按请求键定位已绑定的任务行。
+
+    先校验键格式（与提交时同一规则），非法键抛 invalid_request_key；
+    合法但未绑定的键抛 job_not_found。查询与按请求键重试共用本规则。
+    """
+    if not _REQUEST_KEY_RE.fullmatch(request_key):
+        raise TaskError(ERR_INVALID_REQUEST_KEY)
+    row = conn.execute(
+        "SELECT id, type, input, status, result, error FROM jobs"
+        " WHERE request_key = ?",
+        (request_key,),
+    ).fetchone()
+    if row is None:
+        raise TaskError(ERR_JOB_NOT_FOUND)
+    return row
+
+
 def show_by_request_key(conn, request_key):
     """按请求键查询已绑定的任务记录。
 
     只读取持久化记录：不执行任务、不读取或校验输入文件，不改变状态、
-    结果、错误或键绑定。先校验键格式（与提交时同一规则），非法键抛
-    invalid_request_key；合法但未绑定的键抛 job_not_found。
+    结果、错误或键绑定。
     """
-    if not _REQUEST_KEY_RE.fullmatch(request_key):
-        raise TaskError(ERR_INVALID_REQUEST_KEY)
-    row = conn.execute(
-        "SELECT id, type, input, status, result, error FROM jobs"
-        " WHERE request_key = ?",
-        (request_key,),
-    ).fetchone()
-    if row is None:
-        raise TaskError(ERR_JOB_NOT_FOUND)
-    return _row_to_record(row)
+    return _row_to_record(_get_job_by_request_key(conn, request_key))
 
 
-def retry(conn, job_id):
-    """让 failed 任务重新入队；仅改状态，不读取或校验输入文件。"""
-    row = _get_job(conn, job_id)
-    _id, _task_type, _input, status, _result, _error = row
-    if status != STATUS_FAILED:
-        raise TaskError(ERR_INVALID_STATE)
-    conn.execute(
-        "UPDATE jobs SET status = ?, result = NULL, error = NULL WHERE id = ?",
-        (STATUS_QUEUED, job_id),
-    )
-    conn.commit()
-    return _record(job_id, STATUS_QUEUED, None, None)
+def _retry_row(conn, row):
+    """重试业务规则：仅 failed 任务可重新入队，且仅改状态。
 
-
-def retry_by_request_key(conn, request_key):
-    """按请求键让绑定的 failed 任务重新入队；仅改状态，不读取或校验输入文件。
-
-    先校验键格式（与提交、查询时同一规则），非法键抛 invalid_request_key；
-    合法但未绑定的键抛 job_not_found。绑定任务非 failed 时抛
-    invalid_state，任务记录与键绑定均不变。成功时不新增任务、不解除
-    绑定，返回原 id 的 queued 记录。
+    两种重试入口（按 id、按请求键）共用本规则：非 failed 抛
+    invalid_state，任务记录与键绑定均不变；成功时不新增任务、不解除
+    绑定、不读取或校验输入文件，返回原 id 的 queued 记录。
     """
-    if not _REQUEST_KEY_RE.fullmatch(request_key):
-        raise TaskError(ERR_INVALID_REQUEST_KEY)
-    row = conn.execute(
-        "SELECT id, type, input, status, result, error FROM jobs"
-        " WHERE request_key = ?",
-        (request_key,),
-    ).fetchone()
-    if row is None:
-        raise TaskError(ERR_JOB_NOT_FOUND)
     job_id, _task_type, _input, status, _result, _error = row
     if status != STATUS_FAILED:
         raise TaskError(ERR_INVALID_STATE)
@@ -207,6 +191,16 @@ def retry_by_request_key(conn, request_key):
     )
     conn.commit()
     return _record(job_id, STATUS_QUEUED, None, None)
+
+
+def retry(conn, job_id):
+    """让 failed 任务重新入队；仅改状态，不读取或校验输入文件。"""
+    return _retry_row(conn, _get_job(conn, job_id))
+
+
+def retry_by_request_key(conn, request_key):
+    """按请求键让绑定的 failed 任务重新入队；仅改状态，不读取或校验输入文件。"""
+    return _retry_row(conn, _get_job_by_request_key(conn, request_key))
 
 
 def cancel(conn, job_id):
