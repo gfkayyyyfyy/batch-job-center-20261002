@@ -1,6 +1,6 @@
 ================================================================================
 轻量批处理任务中心 内置数据汇总任务（csv_summary）流程说明
-提交 → 手动执行 → 查询状态与结果（冻结版本核对稿）
+提交 → 手动执行 → 查询状态与结果（源码核对稿）
 ================================================================================
 
 0. 范围、依据与核对结论
@@ -9,14 +9,15 @@
     （submit）、手动执行（run）到查询记录（show）。不涉及新功能设计，不描述
     retry/cancel/请求键的完整语义（仅在与本路径入口相关处标注其存在）。
 
-0.2 依据文件（均为当前工作区实际源码与现有文档，未做任何修改）：
+0.2 依据文件（均为当前工作区实际源码与现有文档，本次只修订本说明，未改动
+    任何源码、接口或数据库结构）：
     - task_center/__main__.py  命令行入口、参数解析、JSON 输出与退出码
     - task_center/core.py      SQLite 存储、提交、执行、查询全部核心逻辑
     - task_center/__init__.py  仅定义 __version__ = "0.1.0"
-    - demo/sales.csv           现有演示输入
+    - demo/sales.csv           仓库自带演示输入（本说明示例不依赖它）
     - README.md                现有公开文档
     版本标识：task_center/__init__.py 的 __version__ = "0.1.0"；
-    仓库当前提交为 de3b5be。
+    本稿据以核对的仓库提交为 bc31dd0（短哈希），核对日期 2026-10-04。
 
 0.3 核对结论：本路径在当前版本已闭环——
     登记（INSERT jobs 行，status=queued）→ 手动 run 同步执行并落库 →
@@ -25,12 +26,13 @@
     本路径涉及的核心函数（connect/submit/run/show）均有公开命令行入口，
     未发现“内部逻辑存在但没有公开入口”的步骤。
 
-0.4 文中“文件:符号（行号）”可直接定位源码，行号以当前版本为准。
+0.4 文中源码引用一律使用“文件路径: 函数/符号名”的形式（例如
+    task_center/core.py: _run_csv_summary），不标注行号，以免源码变动后
+    行号失效；按符号名可直接在当前源码中定位。
 
 1. 公开入口与通用输入输出形式
 --------------------------------------------------------------------------------
-1.1 唯一公开入口是命令行模块（task_center/__main__.py: build_parser，10-44 行；
-    main，86-114 行）：
+1.1 唯一公开入口是命令行模块（task_center/__main__.py: build_parser、main）：
 
       python -m task_center [--db PATH] <submit|run|show|retry|cancel> ...
 
@@ -43,21 +45,19 @@
     submit→run→show 这条路径。）
 
 1.2 --db 为全局参数，位于子命令之前；默认值 core.DEFAULT_DB =
-    项目根目录/tasks.sqlite3（task_center/core.py: PROJECT_ROOT/DEFAULT_DB，
-    12-13 行）。数据库不存在时由 core.connect（core.py 66-75 行）自动创建并
-    建表，因此 show/run 也可指向一个全新库文件。
+    项目根目录/tasks.sqlite3（task_center/core.py: PROJECT_ROOT、DEFAULT_DB）。
+    数据库不存在时由 core.connect 自动创建并建表，因此 show/run 也可指向
+    一个全新库文件。
 
 1.3 每次调用标准输出恰好打印一行 JSON，对象固定含四个键
-    id、status、result、error（task_center/__main__.py: main 末尾
-    json.dumps(record, ensure_ascii=False)，113 行；记录构造见
-    core._record，core.py 92-93 行）。
+    id、status、result、error（task_center/__main__.py: main 末尾的
+    json.dumps(record, ensure_ascii=False)；记录构造见 core._record）。
 
-1.4 退出码（task_center/__main__.py: 86-114 行）：
+1.4 退出码（task_center/__main__.py: main、_exit_code_on_success、_dispatch）：
     - 0：submit 成功；show 命中记录；retry/cancel 成功；
-      run 仅在最终 status == "succeeded" 时为 0
-      （_exit_code_on_success，68-70 行）。
+      run 仅在最终 status == "succeeded" 时为 0。
     - 1：业务拒绝或执行失败（core.TaskError 被捕获），JSON 的 error 填写
-      错误码（main 的 except，106-109 行；_dispatch，73-83 行）。
+      错误码。
     - 2：argparse 参数层错误（如缺少 id、未知子命令），由 argparse 默认
       处理：stderr 打印 usage，不产出 JSON。此行为已实测。
     注：本机 shell 无 python 命令，实测使用 python3；以下示例以 README 的
@@ -68,38 +68,39 @@
 2.1 入口形式
       python -m task_center [--db PATH] submit csv_summary --input <相对路径>
     对应 core.submit(conn, task_type, input_path, request_key=None)
-    （task_center/core.py: 101-134 行）。
+    （task_center/core.py: submit）。
 
 2.2 汇总输入的来源
     - 输入是一个 CSV 文件路径字符串，按原样存入 jobs.input（INSERT 时绑定的
-      是入参原字符串，见 core.py 128-132 行），后续执行时再按该字符串解析。
-    - 路径解析规则见 core._resolve_input（core.py 78-89 行）：
-      相对路径相对于“项目根目录”PROJECT_ROOT（core.py 12 行，即 task_center
-      包所在目录的上一级）拼接，而不是相对于当前 shell 工作目录；
-      绝对路径直接使用。随后用 os.path.realpath 解析真实路径（符号链接会被
-      展开），要求 demo 目录的真实路径位于该文件真实路径的父级链中，且
-      real.is_file() 为真（普通文件、存在）。任一不满足即拒绝。
+      是入参原字符串），后续执行时再按该字符串解析。
+    - 路径解析规则见 core._resolve_input：
+      相对路径相对于“项目根目录”PROJECT_ROOT（即 task_center 包所在目录的
+      上一级）拼接，而不是相对于当前 shell 工作目录；绝对路径直接使用。
+      随后用 os.path.realpath 解析真实路径（符号链接会被展开），要求 demo
+      目录的真实路径位于该文件真实路径的父级链中，且 real.is_file() 为真
+      （普通文件、存在）。任一不满足即拒绝。
     - 提交阶段只做类型与路径/文件元数据检查，不打开、不读取文件内容
       （submit 全文无 open 调用；内容读取仅存在于 _run_csv_summary）。
+      因此“提交时合法、执行时内容才暴露问题”是预期行为，第 8 节示例二
+      即据此构造。
 
-2.3 检查顺序与拒绝（core.submit，101-126 行）
-    1) task_type 不在 TASK_TYPES（={"csv_summary"}，core.py 16 行）→
+2.3 检查顺序与拒绝（core.submit）
+    1) task_type 不在 TASK_TYPES（={"csv_summary"}）→
        抛 TaskError("invalid_type")。
     2) 若提供 --request-key：校验键并查同库绑定（本路径不使用该参数，
        细节从略；错误码 invalid_request_key / request_conflict 的入口与
-       常量确实存在，见 core.py 25-26、35、113-125 行）。
+       常量确实存在，见 core._REQUEST_KEY_RE 及 submit 中的请求键分支）。
     3) _resolve_input(input_path) 失败（文件不存在、在 demo/ 之外、
        不是普通文件、符号链接指向 demo/ 之外）→ TaskError("invalid_input")。
-    拒绝时不写数据库（INSERT 在全部检查之后，core.py 127-133 行）。
+    拒绝时不写数据库（INSERT 在全部检查之后）。
     CLI 层输出固定为 {"id": null, "status": null, "result": null,
-    "error": "<错误码>"}（submit 参数无 id，_rejection_record 回显 None，
-    __main__.py 107-108 行；已实测），退出码 1。
+    "error": "<错误码>"}（submit 参数无 id，_rejection_record 回显 None），
+    退出码 1。invalid_type、invalid_input 两种拒绝均已实测。
 
 2.4 登记与“入队”的实际含义
-    - 检查通过后：id = uuid.uuid4().hex（32 个十六进制字符，core.py 127 行）；
-      向 jobs 表 INSERT 一行：id、type、input、status="queued"、
-      result=NULL、error=NULL、request_key（不带键时为 NULL），随后 commit
-      （core.py 128-133 行）。
+    - 检查通过后：id = uuid.uuid4().hex（32 个十六进制字符）；向 jobs 表
+      INSERT 一行：id、type、input、status="queued"、result=NULL、
+      error=NULL、request_key（不带键时为 NULL），随后 commit。
     - 成功输出：{"id": <id>, "status": "queued", "result": null,
       "error": null}，退出码 0（已实测）。
     - “入队”在本版本中就是该 jobs 行的 status 取 queued：不存在独立的队列
@@ -107,82 +108,134 @@
       直到被第 3 节的 run 显式执行。
 
 2.5 存储结构（仅描述现状，不改变任何结构）
-    core.connect（core.py 66-75 行）创建 jobs 表（_SCHEMA，37-46 行）：
+    core.connect 创建 jobs 表（core._SCHEMA）：
     id TEXT PRIMARY KEY, type TEXT, input TEXT, status TEXT,
     result TEXT, error TEXT；另有 request_key 列（旧库经
-    ALTER TABLE 补齐，49 行）与 request_key 唯一索引（52-55 行）。
-    全库只有这一张业务表。
+    ALTER TABLE 补齐）与 request_key 唯一索引。全库只有这一张业务表。
 
 3. 步骤二：手动执行——什么操作开始执行、产出什么
 --------------------------------------------------------------------------------
 3.1 入口形式
       python -m task_center [--db PATH] run <id>
-    CLI 经 _dispatch 调 core.run(conn, job_id)
-    （__main__.py 95-98、73-83 行；core.run 在 core.py 223-247 行）。
-    这是本版本中唯一会开始执行汇总的公开操作：同步在当前命令进程内完成，
-    无线程、无子进程（core.py 未 import subprocess；README“计划采用
-    subprocess”的设想在本路径上尚无对应实现）。
+    CLI 经 _dispatch 调 core.run(conn, job_id)。这是本版本中唯一会开始
+    执行汇总的公开操作：同步在当前命令进程内完成，无线程、无子进程
+    （core.py 未 import subprocess；README“计划采用 subprocess”的设想
+    在本路径上尚无对应实现）。
 
-3.2 执行前置检查（core.run，225-228 行）
-    1) core._get_job（137-144 行）按 id 查行；查不到 →
-       TaskError("job_not_found")。
+3.2 执行前置检查（core.run）
+    1) core._get_job 按 id 查行；查不到 → TaskError("job_not_found")。
     2) 该行 status 必须恰为 "queued"，否则 TaskError("invalid_state")，
-       数据库不做任何改动。
-    3) 再次调用 _resolve_input(input_path)（231 行）——执行时重新解析路径。
-       因此提交后文件被删除/移动/替换为指向 demo 外的链接，会在执行期暴露。
-       注意 run 的 except 把提交期的同名错误码 invalid_input 改记为
-       input_error（core.py 234 行：
+       数据库不做任何改动（详见 3.6）。
+    3) 再次调用 _resolve_input(input_path)——执行时重新解析路径、重新确认
+       demo 内普通文件。因此提交后文件被删除/移动/替换为指向 demo 外的
+       链接，会在执行期暴露。run 的 except 把提交期的同名错误码
+       invalid_input 改记为 input_error（见 core.run 中
        code = ERR_INPUT if exc.code == ERR_INVALID_INPUT else exc.code）。
 
-3.3 汇总计算 core._run_csv_summary(real_path)（core.py 180-220 行）
-    - 读取：open(real_path, "r", encoding="utf-8", newline="") 后一次性
-      fh.read()（183-184 行）。
-      * UnicodeDecodeError（非合法 UTF-8）→ TaskError("data_error")（185-186 行）
-      * OSError（文件存在但不可读等打开/读取失败）→
-        TaskError("input_error")（187-188 行）
-    - CSV 解析：csv.reader(io.StringIO(text))，并用列表推导立即物化，
-      故 csv.Error（如字段超过解析器默认长度上限）能在此处被捕获 →
-      TaskError("data_error")（190-195 行）。完全空行被 csv 解析为空列表，
-      以 `if row` 过滤（191 行）。
-    - 空内容（过滤后无任何行）→ data_error（196-197 行）。
-    - 首行每个单元格去除首尾空格后必须恰等于 ["category", "amount"]，
-      否则 data_error（198-199 行）。
-    - 其后每条数据行（204-214 行）：
-      * 必须恰为两列，否则 data_error（205-206 行）；
-      * category = 第 1 列 strip，不能为空（207、209 行）；
-        代码未对类别做字符集限制，区分大小写；
-      * amount = 第 2 列 strip，必须整串匹配正则 [0-9]+
-        （_AMOUNT_RE，32 行；209 行），即非负整数字面量；否则 data_error；
-      * value = int(amount)，累计 row_count（数据行计数，不含表头）、
-        total_amount（金额总和）、categories（按类别求和的映射，
-        键为 strip 后的类别，按首次出现顺序插入，211-214 行）。
-    - 成功返回 dict：{"row_count", "total_amount", "categories"}
-      （216-220 行）。
+3.3 汇总计算 core._run_csv_summary(real_path)（task_center/core.py）
+    当前实现为流式逐行读取与解析：直接把 open 得到的文件对象交给
+    csv.reader 并以 while 循环反复 next(reader) 取逻辑记录；不保留整份
+    文件文本，也不用列表推导物化全部记录（这与早期“fh.read() 一次性读取
+    + 物化全部行”的写法不同，本稿以当前源码为准）。
 
-3.4 成功落库与输出（core.run，242-247 行）
-    UPDATE 同一行：status="succeeded"，result=结果的 JSON 字符串
-    （json.dumps(..., ensure_ascii=False)），error=NULL，commit。
-    标准输出：{"id", "status": "succeeded", "result": {上述三个键},
-    "error": null}，退出码 0（_exit_code_on_success 仅认 succeeded）。
+    (a) 打开与编码
+        - open(real_path, "r", encoding="utf-8", newline="") 本身抛
+          OSError（文件存在但打不开等）→ TaskError("input_error")。
+          此时尚未取得文件句柄，无关闭动作。
+        - 文件以 UTF-8 解码；迭代读取中若某段字节不是合法 UTF-8，
+          csv.reader 迭代抛出 UnicodeDecodeError → TaskError("data_error")。
+          由于是逐行迭代，解码错误可能在已经读到若干合法逻辑记录之后
+          才暴露（已实测：先有合法行 a,10、随后出现非法字节时仍判
+          data_error，且不留下部分汇总，见 3.5）。
+        - 打开成功之后迭代读取期间抛出 OSError（读取中途失败）→
+          TaskError("input_error")。
 
-3.5 失败落库与输出（core.run，233-240 行）
-    执行期任何 TaskError 都走失败分支：UPDATE 同一行 status="failed"、
-    result=NULL、error=错误码（input_error 或 data_error），commit；
-    输出 {"id", "status": "failed", "result": null, "error": <错误码>}，
-    退出码 1（succeeded 之外退出码均为 1，__main__.py 68-70 行）。
-    失败不保留部分结果（result 直接置 NULL）。失败记录持久存在，可被
-    show 读回，也可再次作为 run 的状态检查对象（此时得到 invalid_state）。
+    (b) CSV 解析与逻辑记录计数
+        - reader = csv.reader(fh)：引号字段内的换行属于该字段内容，
+          解析器会自行继续取下一物理行拼成同一条逻辑记录，不增加记录数
+          （已实测："a\nb",10 这一条跨物理行的记录计为 1 行，类别为
+          "a\nb"）。
+        - csv.reader 拒绝的数据（迭代时抛 csv.Error，典型如字段超过解析器
+          默认长度上限）→ TaskError("data_error")，不把底层异常文字暴露
+          给调用方或写入记录。该分支由 tests/test_csv_parse_error_regression.py
+          回归测试覆盖。
+        - 完全空行（csv.reader 产出空列表 []）一律以 `if not row: continue`
+          忽略，不计入任何记录；表头之前出现的完全空行同样跳过，因此
+          第一条非空逻辑记录才被当作表头。注意：只含空格的物理行会被
+          解析为含一个空格字段的非空记录，不属于“完全空行”。
+
+    (c) 表头
+        - 第一条非空逻辑记录的每个单元格去除首尾空格后，必须恰为
+          ["category", "amount"]，否则 data_error。
+        - 仅有表头、其后没有任何数据行时，执行成功：row_count=0、
+          total_amount=0、categories={}，status=succeeded，退出码 0
+          （已实测）。
+        - 过滤后连表头都没有（空文件，或仅含完全空行）→ data_error
+          （已实测空文件）。
+
+    (d) 数据行规则（字段处理保持现状）
+        对表头之后的每条逻辑记录：
+        * 必须恰为两列，否则 data_error；
+        * category = 第 1 列 strip，不能为空；代码未对类别做字符集限制，
+          类别区分大小写（"A" 与 "a" 是两个键）；
+        * amount = 第 2 列 strip，必须整串匹配 _AMOUNT_RE = [0-9]+
+          （fullmatch），即非负整数字面量；否则 data_error；
+        * value = int(amount)，累计 row_count（数据行计数，不含表头）、
+          total_amount（金额总和）、categories（按 strip 后类别求和的
+          映射，键按首次出现顺序插入）。
+
+    (e) 文件关闭
+        open 成功后，迭代与累计整体处于 try 块中，finally 无条件执行
+        fh.close()：正常读完、仅表头、以及读取/解码/解析/字段校验中途
+        失败抛 TaskError 时，文件句柄都会被关闭。
+
+    (f) 成功返回
+        dict：{"row_count", "total_amount", "categories"}。
+
+3.4 内存特征（流式不等于恒定内存）
+    不物化整份文本与全部数据行，工作内存不随“数据行总数”线性增长；但它
+    并非恒定内存，仍会随以下内容增长：
+    - categories 映射：不同类别（去空白后）越多，占用越大；
+    - csv.reader 当前正在解析的单条逻辑记录：引号内换行拼接、超长字段等
+      情形下，一条逻辑记录本身可能很大；
+    - 文件对象自身的读取缓冲。
+    因此不能把流式读取解释为“与数据量无关的恒定内存”。
+
+3.5 成功与失败落库（core.run）
+    - 成功：UPDATE 同一行 status="succeeded"，result=结果的 JSON 字符串
+      （json.dumps(..., ensure_ascii=False)），error=NULL，commit。
+      输出 {"id", "status": "succeeded", "result": {上述三个键},
+      "error": null}，退出码 0。
+    - 失败：执行期任何 TaskError（含 _resolve_input 的重新检查，以及
+      _run_csv_summary 的全部失败分支）走同一失败分支：UPDATE 同一行
+      status="failed"、result=NULL、error=错误码（input_error 或
+      data_error），commit；输出 {"id", "status": "failed",
+      "result": null, "error": <错误码>}，退出码 1。
+      失败不保留部分结果：即使此前已经读到并累计了合法行（例如错误出现在
+      第二条数据行、或中途遇到非法字节），result 也直接置 NULL（已实测）。
+      失败记录持久存在，可被 show 读回；对其再次 run 只得到 invalid_state
+      （见 3.6），库里保存的 failed/错误码不变。
+
+3.6 非 queued 任务再执行 run
+    对 status 为 succeeded/failed/cancelled 的行，core.run 在状态检查处
+    抛 invalid_state 且不触碰输入文件、不改动数据库（原保存的 status、
+    result、error 全部保持）。CLI 的 _rejection_record 对该错误码会先
+    show 读回当前记录，仅把本次响应的 error 字段替换为 "invalid_state"，
+    即响应附带该行当前 status 与 result（succeeded 行携带原结果、failed
+    行 result=null），退出码 1。已实测 succeeded 行与 failed 行再 run 的
+    响应；“保存值不变”由 tests/test_run_state.py 回归测试覆盖。
 
 4. 步骤三：查询——实际能取得哪些状态和结果
 --------------------------------------------------------------------------------
 4.1 入口形式
       python -m task_center [--db PATH] show <id>
-    对应 core.show → _get_job → _row_to_record
-    （core.py 147-149、96-98 行；__main__.py 103-105 行）。
+    对应 core.show → _get_job → _row_to_record。
 
 4.2 show 只把数据库中该行当前内容原样读出：id、status，以及 result
     （非 NULL 时 json.loads 还原为对象，否则 null）、error 字符串。
-    不执行任何计算、不触碰输入文件。queued / succeeded / failed /
+    不执行任何计算、不重新打开或读取输入文件：run 之后即使删除或改动输入
+    文件，show 仍返回保存的记录（第 8 节示例二在 run 后删除输入文件再
+    show，据此核对“show 不重算”，已实测）。queued / succeeded / failed /
     cancelled 任一状态均可查询，命中即退出码 0。
 
 4.3 id 不存在：_get_job 抛 job_not_found；CLI 输出
@@ -195,16 +248,16 @@
 
 5. 本路径的状态语义（仅列源码中存在的取值与流转）
 --------------------------------------------------------------------------------
-5.1 状态常量（core.py 18-21 行）：queued / succeeded / failed / cancelled。
+5.1 状态常量（core.STATUS_*）：queued / succeeded / failed / cancelled。
 5.2 本路径实际发生的流转：
       submit 成功            → queued（新行）
       run 一个 queued 任务   → succeeded（结果落库）或 failed（错误码落库）
-      show                   → 不改变状态
+      show                   → 不改变状态、不重读文件
     run 对非 queued 行（succeeded/failed/cancelled）一律 invalid_state 且
-    原记录不变（core.py 227-228 行）。
+    原记录不变（core.run 状态检查；响应携带当前 status/result，见 3.6）。
 5.3 另有两条已实现的公开流转不在本路径内，仅标注存在：
-    retry 使 failed → queued（core.py 152-163 行）、
-    cancel 使 queued → cancelled（166-177 行）。
+    retry 使 failed → queued（core.retry）、
+    cancel 使 queued → cancelled（core.cancel）。
     被 cancel 的行不能再 run（同样落入 5.2 的 invalid_state）。
 
 6. 总目标中提及、但当前源码在本路径上未实现的部分
@@ -226,107 +279,137 @@
 --------------------------------------------------------------------------------
 阶段      触发条件（源码依据）                              错误码          数据库变化        CLI 输出与退出码
 ----      ----------------------------------------------  --------------  ----------------  ------------------------------
-submit    类型不在 {csv_summary}（submit 111-112 行）      invalid_type    不写库            id=null,status=null,result=null,
+submit    类型不在 {csv_summary}（core.submit）            invalid_type    不写库            id=null,status=null,result=null,
                                                                                             error=invalid_type；退出 1（实测）
 submit    路径经 realpath 不在 demo/ 内，或不存在、        invalid_input   不写库，          同上、error=invalid_input；
-          非普通文件（_resolve_input 78-89 行）                            不占用请求键       退出 1（实测）
-run       id 查无此行（_get_job 137-144 行）               job_not_found   无变化            回显输入 id，余 null，
-                                                                                            error=job_not_found；退出 1（实测 show）
-run       行存在但 status != queued（run 227-228 行）      invalid_state   原记录完全不变    输出该行当前 status/result，
-                                                                                            仅 error 字段改为 invalid_state；
-                                                                                            退出 1（实测：failed 行再 run）
-                                                                                            注意：库里原 error（如 data_error）
-                                                                                            不变，仅本次响应被替换
-                                                                                            （_rejection_record 57-64 行）
-run       执行时路径检查失败（文件已删除/移出 demo 等）    input_error     行更新为          status=failed,result=null,
-          （run 231、234 行把 invalid_input 改名）                         failed,result=    error=input_error；退出 1
-                                                                          NULL,error=码
-run       文件打开/读取抛 OSError（_run_csv_summary        input_error     同上              同上，error=input_error；退出 1
-          187-188 行）
-run       非 UTF-8 编码（UnicodeDecodeError，185-186 行）  data_error      同上              error=data_error；退出 1
-run       csv.reader 抛 csv.Error（如字段超默认长度，      data_error      同上              error=data_error；退出 1
-          191-195 行）
-run       文件过滤后无任何行（196-197 行）；表头去空格     data_error      同上              error=data_error；退出 1
-          后不等于 category,amount（198-199 行）；
-          数据行列数 !=2（205-206 行）；category 去空格
-          为空（207-210 行）；amount 去空格后不整串匹配
-          [0-9]+（32、209 行）
-show      id 查无此行（show 147-149 + _get_job）           job_not_found   无变化、不创建    回显输入 id，余 null，
+          非普通文件（core._resolve_input）                                不占用请求键       退出 1（实测）
+run       id 查无此行（core._get_job）                     job_not_found   无变化            回显输入 id，余 null，
                                                                                             error=job_not_found；退出 1（实测）
-show      id 存在（任意状态，含 failed/cancelled）         —              无变化            原样返回持久记录；退出 0（实测）
+run       行存在但 status != queued（core.run 状态检查）   invalid_state   原记录完全不变    响应输出该行当前 status/result，
+                                                                                            仅 error 改为 invalid_state；退出 1
+                                                                                            （实测 succeeded/failed 行再 run；
+                                                                                            保存值不变由 test_run_state 覆盖）。
+                                                                                            库里原 error（如 data_error）不变，
+                                                                                            仅本次响应被替换（_rejection_record）
+run       执行时路径检查失败（文件已删除/移出 demo 等，    input_error     行更新为          status=failed,result=null,
+          _resolve_input 的 invalid_input 被改名）                         failed,result=    error=input_error；退出 1（实测删除文件）
+                                                                          NULL,error=码
+run       open 抛 OSError（文件存在但打不开）或迭代        input_error     同上              同上，error=input_error；退出 1
+          读取途中抛 OSError（_run_csv_summary）                                                              （中途读取分支见源码，手工未触发）
+run       迭代时非 UTF-8 解码失败（UnicodeDecodeError，    data_error      同上              error=data_error；退出 1
+          可能在已读到合法行之后发生）                                                                       （实测：合法行后接非法字节）
+run       csv.reader 抛 csv.Error（如字段超默认长度，      data_error      同上              error=data_error；退出 1
+          _run_csv_summary 迭代分支）                                                       （test_csv_parse_error_regression 覆盖）
+run       空文件或仅含完全空行（表头都没有，                data_error      同上              error=data_error；退出 1（实测空文件）
+          _run_csv_summary 末尾 header_seen 检查）
+run       表头去空白后不等于 category,amount；              data_error      同上              error=data_error；退出 1
+          数据行列数 !=2；category 去空格为空；
+          amount 去空格后不整串匹配 [0-9]+
+          （均在 _run_csv_summary 数据行分支；
+          amount 非法已实测，见示例二）
+run       仅表头、无数据行                                 —（成功）       succeeded，       row_count=0,total_amount=0,
+                                                                          result=零汇总      categories={}；退出 0（实测）
+show      id 查无此行（core.show + _get_job）              job_not_found   无变化、不创建    回显输入 id，余 null，
+                                                                                            error=job_not_found；退出 1（实测）
+show      id 存在（任意状态，含 failed/cancelled）         —              无变化            原样返回持久记录，不重读文件；
+                                                                                            退出 0（实测，含删除输入文件后）
 CLI 层    缺少位置参数/未知子命令等 argparse 错误          —（无错误码）   无                stderr usage 文本，无 JSON；
           （argparse 默认行为）                                                             退出 2（实测）
 
 说明：以上所有业务异常在 core 层都是同一个异常类型 core.TaskError，
-其 code 属性携带错误码字符串（core.py 58-63 行）；CLI 不向调用方暴露
-底层异常文本（data_error 分支注释明确不泄露 csv 错误原文，193-195 行）。
-本表不含“预期设计”：例如文件可读但为空目录项、权限不足等无法从源码确定
-具体归类的情形，本说明不做推断。
+其 code 属性携带错误码字符串；CLI 不向调用方暴露底层异常文本（data_error
+分支注释明确不泄露 csv 错误原文）。打开成功后的文件句柄在 finally 中
+fh.close()，成功与各失败分支均关闭（见 3.3(e)）。本表不含“预期设计”：
+例如权限位之外的可读性、特殊文件系统等无法从源码确定具体归类的情形，
+本说明不做推断。
 
 8. 可核对的本地使用示例（共两个）
 --------------------------------------------------------------------------------
-约定：以下在项目根目录（含 task_center/ 与 demo/ 的目录）执行；使用独立临时
-数据库 /tmp/tc_doc.sqlite3，不污染默认库。命令采用 README 的公开形式
-python -m task_center（本机实测以 python3 代替）。$ID 表示上一条 submit
-输出中的 id（uuid4 的 32 位十六进制字符串，每次运行不同，属预期动态值）。
+约定：
+- 在项目根目录（含 task_center/ 与 demo/ 的目录）执行；命令采用 README 的
+  公开形式 python -m task_center（本机实测以 python3 代替）。
+- 两个示例各自创建输入文件、使用独立临时数据库，互不影响、不污染默认库，
+  也不依赖仓库已存在 demo/sales.csv（若 demo/ 目录不存在，先执行
+  mkdir -p demo）。输入文件在示例末尾删除。
+- id 是每次运行不同的动态值（uuid4 的 32 位十六进制字符串）。下面用 shell
+  命令直接把 submit 输出中的 id 代入变量（$ID / $BID），无需手工复制：
+    ID=$(python -m task_center --db <库> submit csv_summary --input <文件> \
+      | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+  下文预期 JSON 中以 $ID 占位；实际执行时输出真实 id。
+- 以下两个示例的命令顺序、JSON 预期与退出码均已于本机（python3）按序
+  执行核对。
 
-示例一（正常路径，全部预期值已实测）
+示例一（成功路径：含逗号的引号类别，两条数据合计 15）
 -------------------------------------
-输入使用仓库自带 demo/sales.csv，内容为：
+自备输入（表头 category,amount；两条数据的类别都是引号包裹的 a,b）：
+
+  printf 'category,amount\n"a,b",10\n"a,b",5\n' > demo/_doc_example_ok.csv
+  文件内容逐行为：
+    category,amount
+    "a,b",10
+    "a,b",5
+
+命令顺序与预期输出（独立库 /tmp/tc_doc_ok.sqlite3）：
+
+  ID=$(python3 -m task_center --db /tmp/tc_doc_ok.sqlite3 submit csv_summary \
+        --input demo/_doc_example_ok.csv \
+      | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+  submit 本身输出：
+  {"id": "$ID", "status": "queued", "result": null, "error": null}        退出 0
+
+  python3 -m task_center --db /tmp/tc_doc_ok.sqlite3 run "$ID"
+  → {"id": "$ID", "status": "succeeded", "result": {"row_count": 2, "total_amount": 15, "categories": {"a,b": 15}}, "error": null}
+                                                                          退出 0
+
+  python3 -m task_center --db /tmp/tc_doc_ok.sqlite3 show "$ID"
+  → 与上面 run 的成功记录逐字相同（show 读回保存记录，不重算）          退出 0
+
+结果可由输入直接计算：两条数据行 → row_count=2；金额 10+5=15 →
+total_amount=15；两条同属类别 a,b（引号内的逗号是类别名字符，不是分隔符）
+→ categories={"a,b":15}。状态顺序与执行顺序一致：submit 后 queued，
+run 之后才 succeeded，show 本身不改变状态。
+（若对同一 $ID 再执行一次 run，响应为当前 succeeded 记录但 error 改为
+invalid_state、退出 1，库里记录不变，见 3.6。）
+清理：rm -f demo/_doc_example_ok.csv /tmp/tc_doc_ok.sqlite3
+
+示例二（失败路径：先合法行后非法字段 → failed/data_error，show 不重算）
+---------------------------------------------------------------------------
+自备输入（首条数据合法，第二条金额 x 不匹配 [0-9]+）：
+
+  printf 'category,amount\na,10\nc,x\n' > demo/_doc_example_bad.csv
+  文件内容逐行为：
     category,amount
     a,10
-    b,20
-    a,5
+    c,x
 
-命令与确定的预期输出：
-  python -m task_center --db /tmp/tc_doc.sqlite3 submit csv_summary --input demo/sales.csv
-  → {"id": "$ID", "status": "queued", "result": null, "error": null}        退出 0
+命令顺序与预期输出（独立库 /tmp/tc_doc_bad.sqlite3）：
 
-  python -m task_center --db /tmp/tc_doc.sqlite3 show $ID
-  → {"id": "$ID", "status": "queued", "result": null, "error": null}        退出 0
+  BID=$(python3 -m task_center --db /tmp/tc_doc_bad.sqlite3 submit csv_summary \
+        --input demo/_doc_example_bad.csv \
+      | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+  submit 本身输出：
+  {"id": "$BID", "status": "queued", "result": null, "error": null}       退出 0
+    （提交只查路径与文件元数据、不读内容，故内容非法仍成功排队，见 2.2）
 
-  python -m task_center --db /tmp/tc_doc.sqlite3 run $ID
-  → {"id": "$ID", "status": "succeeded",
-     "result": {"row_count": 3, "total_amount": 35,
-                "categories": {"a": 15, "b": 20}},
-     "error": null}                                                          退出 0
+  python3 -m task_center --db /tmp/tc_doc_bad.sqlite3 run "$BID"
+  → {"id": "$BID", "status": "failed", "result": null, "error": "data_error"}
+                                                                          退出 1
+    （"x" 不整串匹配 [0-9]+；尽管前一行 a,10 已合法累计，失败分支把
+    result 置 NULL，不留下部分汇总，见 3.5。）
 
-  python -m task_center --db /tmp/tc_doc.sqlite3 show $ID
-  → 与上面 run 的成功记录完全相同（进程退出后仍可查）                       退出 0
+  rm -f demo/_doc_example_bad.csv
+    （查询前删除输入文件，用以核对 show 不触碰文件、不重新计算。）
 
-结果可由输入直接计算：数据行 3 行 → row_count=3；金额 10+20+5=35 →
-total_amount=35；类别 a=10+5=15、b=20 → categories={"a":15,"b":20}
-（键按首次出现顺序 a 在前）。状态顺序与执行顺序一致：submit 后 queued，
-run 之后才 succeeded，show 本身不改变状态。
-清理：rm -f /tmp/tc_doc.sqlite3
+  python3 -m task_center --db /tmp/tc_doc_bad.sqlite3 show "$BID"
+  → {"id": "$BID", "status": "failed", "result": null, "error": "data_error"}
+                                                                          退出 0
+    （原样读回持久化的失败记录；文件已删除不影响查询，见 4.2。）
 
-示例二（源码可证明的错误分支：执行期数据非法 → failed/data_error，已实测）
----------------------------------------------------------------------------
-该分支可成立，依据 core._run_csv_summary 的金额校验（core.py 209 行，
-amount 必须整串匹配 [0-9]+）与 run 的失败落库（233-240 行）。先准备一个
-提交时合法（位于 demo/ 内的普通文件）、但执行时内容非法的文件：
-
-  printf 'category,amount\na,x\n' > demo/_doc_bad.csv
-
-  python -m task_center --db /tmp/tc_doc_err.sqlite3 submit csv_summary --input demo/_doc_bad.csv
-  → {"id": "$BID", "status": "queued", "result": null, "error": null}       退出 0
-    （提交只查路径不读内容，故成功登记——submit 101-134 行）
-
-  python -m task_center --db /tmp/tc_doc_err.sqlite3 run $BID
-  → {"id": "$BID", "status": "failed", "result": null,
-     "error": "data_error"}                                                  退出 1
-    （"x" 不匹配 [0-9]+，209 行；失败行落库，235-240 行）
-
-  python -m task_center --db /tmp/tc_doc_err.sqlite3 show $BID
-  → {"id": "$BID", "status": "failed", "result": null,
-     "error": "data_error"}                                                  退出 0
-    （失败记录持久化，show 任意状态可读——show 147-149 行）
-
-清理：
-  rm -f demo/_doc_bad.csv /tmp/tc_doc_err.sqlite3
+清理：rm -f /tmp/tc_doc_bad.sqlite3
+（输入文件 demo/_doc_example_bad.csv 已在示例中删除。）
 
 ================================================================================
-本说明仅核对并记录冻结版本的实际行为，未修改任何接口、数据库结构、任务状态
+本说明仅核对并记录当前版本的实际行为，未修改任何接口、数据库结构、任务状态
 语义或现有文档，亦未新增重试、取消、依赖、定时等功能（retry/cancel 为源码中
 既有的公开子命令，本文件只标注其存在）。
 ================================================================================
