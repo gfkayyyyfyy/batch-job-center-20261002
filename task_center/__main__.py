@@ -49,11 +49,17 @@ def build_parser():
     )
 
     p_cancel = sub.add_parser("cancel", help="取消一个 queued 任务（保留记录，不再执行）")
-    p_cancel.add_argument("id", help="任务 id")
+    p_cancel.add_argument("id", nargs="?", default=None, help="任务 id")
+    p_cancel.add_argument(
+        "--request-key",
+        default=None,
+        help="按请求键取消已绑定的任务（与 id 二选一）",
+    )
 
     # 供 main 在 id 与 --request-key 组合非法时按参数解析失败的方式报错。
     parser.show_parser = p_show
     parser.retry_parser = p_retry
+    parser.cancel_parser = p_cancel
 
     return parser
 
@@ -111,6 +117,9 @@ def main(argv=None):
     if args.command == "retry" and (args.id is None) == (args.request_key is None):
         # 与 show 同一规则：参数解析失败，退出码 2，不连接（也不创建）数据库。
         parser.retry_parser.error("retry 需要且只能提供 id 或 --request-key 之一")
+    if args.command == "cancel" and (args.id is None) == (args.request_key is None):
+        # 与 show/retry 同一规则：参数解析失败，退出码 2，不连接（也不创建）数据库。
+        parser.cancel_parser.error("cancel 需要且只能提供 id 或 --request-key 之一")
     conn = core.connect(args.db)
     try:
         if args.command == "submit":
@@ -138,7 +147,20 @@ def main(argv=None):
             else:
                 record, exit_code = _dispatch(conn, core.retry, args.id, lambda _r: 0)
         elif args.command == "cancel":
-            record, exit_code = _dispatch(conn, core.cancel, args.id, lambda _r: 0)
+            if args.request_key is not None:
+                record, exit_code = _dispatch(
+                    conn,
+                    lambda conn, _id: core.cancel_by_request_key(
+                        conn, args.request_key
+                    ),
+                    None,
+                    lambda _r: 0,
+                    lookup=lambda: core.show_by_request_key(
+                        conn, args.request_key
+                    ),
+                )
+            else:
+                record, exit_code = _dispatch(conn, core.cancel, args.id, lambda _r: 0)
         else:  # show
             if args.request_key is not None:
                 record = core.show_by_request_key(conn, args.request_key)

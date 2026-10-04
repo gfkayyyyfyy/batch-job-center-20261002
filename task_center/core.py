@@ -207,10 +207,14 @@ def retry_by_request_key(conn, request_key):
     return _requeue_failed(conn, _get_job_by_request_key(conn, request_key))
 
 
-def cancel(conn, job_id):
-    """取消 queued 任务：仅把状态改为 cancelled，不读取或校验输入文件。"""
-    row = _get_job(conn, job_id)
-    _id, _task_type, _input, status, _result, _error = row
+def _cancel_queued(conn, row):
+    """取消规则：仅 queued 任务可取消，两种定位入口共用。
+
+    仅把状态改为 cancelled 并清空 result/error，沿用原 id，不新增
+    任务、不解除键绑定、不读取或校验输入文件；非 queued 时抛
+    invalid_state，任务记录不变。
+    """
+    job_id, _task_type, _input, status, _result, _error = row
     if status != STATUS_QUEUED:
         raise TaskError(ERR_INVALID_STATE)
     conn.execute(
@@ -219,6 +223,20 @@ def cancel(conn, job_id):
     )
     conn.commit()
     return _record(job_id, STATUS_CANCELLED, None, None)
+
+
+def cancel(conn, job_id):
+    """取消 queued 任务：仅把状态改为 cancelled，不读取或校验输入文件。"""
+    return _cancel_queued(conn, _get_job(conn, job_id))
+
+
+def cancel_by_request_key(conn, request_key):
+    """按请求键取消绑定的 queued 任务；仅改状态，不读取或校验输入文件。
+
+    定位规则与按键查询一致，取消规则与按 id 取消一致：成功时不新增
+    任务、不解除绑定，返回原 id 的 cancelled 记录。
+    """
+    return _cancel_queued(conn, _get_job_by_request_key(conn, request_key))
 
 
 def _run_csv_summary(real_path):
