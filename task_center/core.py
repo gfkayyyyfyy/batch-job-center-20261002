@@ -148,6 +148,27 @@ def show(conn, job_id):
     return _row_to_record(_get_job(conn, job_id))
 
 
+def list_jobs(conn, status=None):
+    """列出已保存的任务记录，按任务 id 的字符串升序排列。
+
+    只读取持久化记录：不执行任务、不做汇总、不读取或校验输入文件，
+    不改变状态、结果、错误或请求键绑定。status 为 None 时返回全部
+    任务；否则只返回状态与之完全相等的记录（区分大小写）。每条记录
+    与 show 返回的四字段一致：成功保留结果对象，失败保留原错误码。
+    """
+    if status is None:
+        rows = conn.execute(
+            "SELECT id, type, input, status, result, error FROM jobs ORDER BY id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, type, input, status, result, error FROM jobs"
+            " WHERE status = ? ORDER BY id",
+            (status,),
+        ).fetchall()
+    return [_row_to_record(row) for row in rows]
+
+
 def _get_job_by_request_key(conn, request_key):
     """按请求键查找绑定任务：先校验格式再查绑定。
 
