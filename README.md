@@ -23,6 +23,9 @@ python -m task_center run <id>
 # 查询已保存的任务记录（退出后仍可查询）
 python -m task_center show <id>
 
+# 按请求键查询已绑定的任务（与 id 二选一，只保存请求键也能找回记录）
+python -m task_center show --request-key sales-1
+
 # 让 failed 任务重新入队（沿用原 id，不立即执行、不读取文件）
 python -m task_center retry <id>
 
@@ -58,6 +61,19 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 - 已有绑定而类型或路径不匹配时返回 `request_conflict`（退出码 1），不检查新路径、
   不修改原任务。
 - 旧版数据库首次使用时自动补齐键绑定列；既有任务的键为空，不参与请求键匹配。
+
+### 按请求键查询（show --request-key）
+
+- `show` 接受任务 id 或 `--request-key` 之一；同时提供或都不提供时按参数解析失败
+  处理（退出码 2，用法提示写标准错误，标准输出不输出 JSON）。
+- 键的合法性规则与提交时相同；非法键返回 `invalid_request_key`，合法但未绑定的键
+  返回 `job_not_found`（两者 id/status/result 均为 null，退出码 1，先检查键格式
+  再查绑定）。
+- 找到绑定时返回该任务当前保存的完整记录（含真实 id，不额外返回输入路径或请求键），
+  queued、succeeded、failed、cancelled 各状态退出码均为 0——即使记录的 error 为
+  `data_error` 或 `input_error`，查询也不视为执行失败。
+- 查询不执行任务、不读取或校验输入文件，不改变状态、结果、错误或键绑定；
+  文件被删除或改写后仍可查询，跨进程查询返回相同的持久化记录。
 
 ### 错误码
 
@@ -106,12 +122,14 @@ python -m task_center --db /path/to/tasks.sqlite3 show <id>
 retry 恢复，
 `tests/test_cancel_regression.py` 覆盖排队任务取消（cancel）的公开行为，
 `tests/test_request_key_regression.py` 覆盖提交去重（--request-key）的公开行为，
+`tests/test_show_request_key_regression.py` 覆盖按请求键查询（show --request-key）
+的公开行为，
 `tests/test_legacy_db_regression.py` 覆盖旧版 SQLite 数据库（jobs 表仅六列、
 无 request_key 列）首次使用与再次打开时的自动兼容及旧库上的请求键行为，
 仅需 Python 3 标准库，在项目根目录运行：
 
 ```bash
-python -m unittest tests.test_retry_regression tests.test_cancel_regression tests.test_request_key_regression tests.test_legacy_db_regression tests.test_csv_parse_error_regression -v
+python -m unittest tests.test_retry_regression tests.test_cancel_regression tests.test_request_key_regression tests.test_show_request_key_regression tests.test_legacy_db_regression tests.test_csv_parse_error_regression -v
 ```
 
 测试通过 `python -m task_center` 子进程观察 JSON 输出与退出码。演示数据由测试
@@ -120,7 +138,9 @@ python -m unittest tests.test_retry_regression tests.test_cancel_regression test
 `a,x` 制造 `data_error` 失败任务，再改写为 `a,10`、`b,20`、`a,5` 验证成功路径）与
 `cancel_regression_case.csv`（`a,10`，并在取消前删除或改写为非法内容验证 cancel
 不读取文件）与 `request_key_regression_case.csv`（`a,10`、`b,20`、`a,5`，验证同键
-去重、冲突与键合法性）与 `legacy_db_regression_case.csv`（同为 `a,10`、
+去重、冲突与键合法性）与 `show_request_key_regression_case.csv`（同为
+`a,10`、`b,20`、`a,5`，验证按键查询各状态记录、键合法性与参数组合失败）与
+`legacy_db_regression_case.csv`（同为 `a,10`、
 `b,20`、`a,5`，配合手工建立的六列旧库验证迁移后旧记录可读与带键提交），并通过 `--db` 使用临时目录下的独立 SQLite 数据库。同名样例若已存在，
 对应模块直接失败且不改动该文件。测试不依赖预置
 任务或外部服务，结束后仅删除自建文件与临时库；`demo/` 由测试创建且已为空时才一并

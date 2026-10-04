@@ -148,6 +148,25 @@ def show(conn, job_id):
     return _row_to_record(_get_job(conn, job_id))
 
 
+def show_by_request_key(conn, request_key):
+    """按请求键查询已绑定的任务记录。
+
+    只读取持久化记录：不执行任务、不读取或校验输入文件，不改变状态、
+    结果、错误或键绑定。先校验键格式（与提交时同一规则），非法键抛
+    invalid_request_key；合法但未绑定的键抛 job_not_found。
+    """
+    if not _REQUEST_KEY_RE.fullmatch(request_key):
+        raise TaskError(ERR_INVALID_REQUEST_KEY)
+    row = conn.execute(
+        "SELECT id, type, input, status, result, error FROM jobs"
+        " WHERE request_key = ?",
+        (request_key,),
+    ).fetchone()
+    if row is None:
+        raise TaskError(ERR_JOB_NOT_FOUND)
+    return _row_to_record(row)
+
+
 def retry(conn, job_id):
     """让 failed 任务重新入队；仅改状态，不读取或校验输入文件。"""
     row = _get_job(conn, job_id)
